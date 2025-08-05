@@ -16,6 +16,11 @@ const app = express();
 const proxy = createProxyServer({ changeOrigin: true });
 app.use(express.json({ limit: '100mb' }));
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', version: '1.0.0' });
+});
+
 // Set long timeouts for all requests (10 minutes)
 app.use((req, res, next) => {
   req.setTimeout(600000); // 10 minutes
@@ -303,7 +308,13 @@ app.use((req, res) => {
   }
 });
 
+const VERSION = '1.0.0';
 app.listen(LISTEN_PORT, '127.0.0.1', () => {
+  console.log(`\n===========================================`);
+  console.log(`🚀 Copilot BYOK → Ollama → llama-server 🚀`);
+  console.log(`Version: ${VERSION}`);
+  console.log(`A seamless bridge for VS Code Copilot, Ollama, and local LLMs with tool support.`);
+  console.log(`===========================================\n`);
   console.log(`Proxy listening on http://127.0.0.1:${LISTEN_PORT}`);
   console.log(`Upstream target: ${UPSTREAM}`);
   console.log(`Configure VS Code to use: http://127.0.0.1:${LISTEN_PORT}`);

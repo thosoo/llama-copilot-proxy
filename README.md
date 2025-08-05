@@ -1,3 +1,9 @@
+---
+## Version
+
+Current version: **1.0.0**
+
+---
 ## Installation
 
 1. **Clone the repository:**
@@ -229,4 +235,49 @@ The test suite includes 5 test cases:
 All tests verify that upstream JSON payloads are properly minified (no line breaks or extra whitespace) as required by llama.cpp.
 
 ---
+
+## Usage Examples
+
+### Chat Completion
+Send a POST request to `/api/chat` (rewritten to `/v1/chat/completions`):
+```bash
+curl -X POST http://127.0.0.1:11434/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "your-model", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+### Tool-Calling Example
+Send a POST request with tools:
+```bash
+curl -X POST http://127.0.0.1:11434/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "your-model",
+    "messages": [{"role": "user", "content": "Call a tool!"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "getWeather",
+        "description": "Get weather info",
+        "parameters": {"location": {"type": "string"}}
+      }
+    }]
+  }'
+```
+
+---
+
+## Environment Variables
+
+- `VERBOSE=1` — Enable verbose logging (shows proxied JSONs and debug info)
+- `LISTEN_PORT` — Change the proxy listening port (default: 11434)
+- `UPSTREAM` — Change the upstream llama-server URL (default: http://127.0.0.1:11433)
+
+Set environment variables before starting the proxy:
+```bash
+VERBOSE=1 LISTEN_PORT=11434 UPSTREAM=http://127.0.0.1:11433 node inject-capabilities.js
+```
+
+---
+
 For more details, see the source code and comments in `inject-capabilities.js`. Contributions and feedback are welcome!
