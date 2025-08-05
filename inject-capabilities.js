@@ -311,9 +311,9 @@ app.use((req, res) => {
 const VERSION = '1.0.0';
 app.listen(LISTEN_PORT, '127.0.0.1', () => {
   console.log(`\n===========================================`);
-  console.log(`🚀 Copilot BYOK → Ollama → llama-server 🚀`);
+  console.log(`🚀 Copilot BYOK → llama.cpp Integration Proxy 🚀`);
   console.log(`Version: ${VERSION}`);
-  console.log(`A seamless bridge for VS Code Copilot, Ollama, and local LLMs with tool support.`);
+  console.log(`A seamless bridge for VS Code Copilot and local llama.cpp (llama-server) with tool support.`);
   console.log(`===========================================\n`);
   console.log(`Proxy listening on http://127.0.0.1:${LISTEN_PORT}`);
   console.log(`Upstream target: ${UPSTREAM}`);

@@ -22,9 +22,9 @@ Current version: **1.0.0**
 
 ---
 
-# Copilot BYOK → Ollama → llama-server Integration Proxy
+# Copilot BYOK → llama.cpp Integration Proxy
 
-This proxy bridges VS Code Copilot's BYOK (Bring Your Own Key) feature with local llama-server instances, handling API endpoint translation and tool-calling compatibility.
+This proxy bridges VS Code Copilot's BYOK (Bring Your Own Key) feature with local llama.cpp (llama-server) instances, handling API endpoint translation and tool-calling compatibility.
 
 ## Quick Start
 
@@ -49,7 +49,7 @@ This proxy bridges VS Code Copilot's BYOK (Bring Your Own Key) feature with loca
 
 ## Problem Solved
 
-VS Code Copilot's BYOK feature expects Ollama-style API endpoints (`/api/chat`), but llama-server uses OpenAI-compatible endpoints (`/v1/chat/completions`). Additionally, tool-calling schemas need specific formatting.
+VS Code Copilot's BYOK feature expects Ollama-style API endpoints (`/api/chat`), but llama.cpp (llama-server) uses OpenAI-compatible endpoints (`/v1/chat/completions`). Additionally, tool-calling schemas need specific formatting.
 
 ### Key Features
 
@@ -62,7 +62,7 @@ VS Code Copilot's BYOK feature expects Ollama-style API endpoints (`/api/chat`),
 ## Architecture
 
 ```
-VS Code Copilot (BYOK) → Proxy (Port 11434) → llama-server (Port 11433)
+VS Code Copilot (BYOK) → Proxy (Port 11434) → llama.cpp (llama-server, Port 11433)
     /api/chat                                      /v1/chat/completions
 ```
 
@@ -118,16 +118,16 @@ This proxy makes it possible to use local LLM models with VS Code Copilot in age
 
 ---
 
-## Copilot BYOK → llama-server Path Rewriting
+## Copilot BYOK → llama.cpp Path Rewriting
 
-This proxy automatically rewrites Copilot's hard-coded Ollama-style endpoints to the OpenAI-style endpoints expected by llama-server:
+This proxy automatically rewrites Copilot's hard-coded Ollama-style endpoints to the OpenAI-style endpoints expected by llama.cpp (llama-server):
 
 - `POST /api/chat` → `POST /v1/chat/completions`
 - `POST /api/generate` → `POST /v1/completions`
 
-This enables seamless interoperability between Copilot Agent Mode and llama-server (Qwen-3, etc.) with tool-calling support (when `--jinja` is enabled).
+This enables seamless interoperability between Copilot Agent Mode and llama.cpp (llama-server, Qwen-3, etc.) with tool-calling support (when `--jinja` is enabled).
 
-**No changes are needed in Copilot or llama-server.** Just run the proxy and it will handle all necessary path rewrites and payload forwarding.
+**No changes are needed in Copilot or llama.cpp.** Just run the proxy and it will handle all necessary path rewrites and payload forwarding.
 
 ---
 
