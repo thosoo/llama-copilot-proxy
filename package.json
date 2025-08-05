@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "Proxy server for VS Code Copilot to llama-server integration",
   "type": "module",
-  "main": "inject-capabilities.js",
+  "main": "proxy-server.js",
   "scripts": {
-    "start": "node inject-capabilities.js",
+    "start": "node proxy-server.js",
     "test": "node test/inject-capabilities.test.js"
   },
   "dependencies": {

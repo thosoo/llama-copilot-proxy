@@ -112,7 +112,7 @@ A seamless Node.js proxy for bridging VS Code Copilot's BYOK (Bring Your Own Key
 
 2. **Start the proxy:**
    ```bash
-   node inject-capabilities.js
+   node proxy-server.js
    ```
 
 3. **Configure VS Code Copilot:**
@@ -165,7 +165,7 @@ This proxy makes it possible to use local LLM models with VS Code Copilot in age
 
 2. **Start the proxy**:
    ```bash
-   node inject-capabilities.js
+   node proxy-server.js
    ```
    The proxy will listen on `http://127.0.0.1:11434` and forward to llama.cpp on `http://127.0.0.1:11433`.
 
@@ -351,7 +351,7 @@ curl -X POST http://127.0.0.1:11434/api/chat \
 
 Set environment variables before starting the proxy:
 ```bash
-VERBOSE=1 LISTEN_PORT=11434 UPSTREAM=http://127.0.0.1:11433 node inject-capabilities.js
+VERBOSE=1 LISTEN_PORT=11434 UPSTREAM=http://127.0.0.1:11433 node proxy-server.js
 ```
 
 ---
