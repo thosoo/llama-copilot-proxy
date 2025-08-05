@@ -24,7 +24,7 @@ Current version: **1.0.0**
 
 # Copilot BYOK → llama.cpp Integration Proxy
 
-This proxy bridges VS Code Copilot's BYOK (Bring Your Own Key) feature with local llama.cpp (llama-server) instances, handling API endpoint translation and tool-calling compatibility.
+A seamless Node.js proxy for bridging VS Code Copilot's BYOK (Bring Your Own Key) feature with local llama.cpp (llama-server) instances. Handles API endpoint translation, tool-calling compatibility, streaming, and error handling for agent mode workflows.
 
 ## Quick Start
 
@@ -280,4 +280,98 @@ VERBOSE=1 LISTEN_PORT=11434 UPSTREAM=http://127.0.0.1:11433 node inject-capabili
 
 ---
 
-For more details, see the source code and comments in `inject-capabilities.js`. Contributions and feedback are welcome!
+## Advanced Troubleshooting
+
+### Common Issues & Solutions
+
+**Copilot disconnects immediately (`ECONNRESET`)**
+- Ensure the proxy is running and listening on the correct port (`11434`).
+- Check that the llama-server is started with the correct flags (`--jinja`, and a compatible chat template).
+- Verify that VS Code Copilot is configured to use the proxy URL (`http://127.0.0.1:11434`).
+- Try enabling verbose logging (`VERBOSE=1`) to see detailed request/response logs.
+- If using Windows, check for firewall or antivirus interference.
+- If using WSL, ensure ports are forwarded correctly.
+
+**Copilot requests not appearing in proxy logs**
+- Double-check VS Code settings for Copilot override engine.
+- Restart VS Code after changing settings.
+- Make sure no other service is using port `11434`.
+
+**Tool-calling fails with `key 'parameters' not found`**
+- Confirm that your model and server support OpenAI function calling format.
+- Ensure all tools in the payload have a `parameters` object (the proxy auto-patches this, but malformed requests may still fail).
+- Use the test suite (`node test/inject-capabilities.test.js`) to verify JSON minification and tool schema patching.
+
+**Streaming responses are not received**
+- Check that the proxy sets `text/event-stream` headers and flushes them immediately.
+- Try with `curl` to verify streaming works outside VS Code.
+- If using nginx or another reverse proxy, disable buffering (`proxy_buffering off;`).
+
+**Proxy returns 502 errors**
+- Check upstream llama-server logs for errors.
+- Ensure the model is loaded and ready to accept requests.
+- Try restarting both the proxy and llama-server.
+
+**Performance is slow**
+- Use models with lower quantization for faster inference.
+- Run both proxy and llama-server on the same machine for minimal latency.
+- Monitor system resources (CPU, RAM) and optimize model size as needed.
+
+---
+
+## Security Considerations
+
+- **Environment Variables:** Never commit sensitive environment variables (API keys, secrets) to version control. Use a `.env` file and add it to `.gitignore`.
+- **Proxy Exposure:** Run the proxy on localhost or a secure internal network. Avoid exposing it to the public internet unless protected by authentication and HTTPS.
+- **Upstream Server:** Ensure the upstream llama-server is also protected and not exposed to unauthorized access.
+- **Logging:** If verbose logging is enabled, be aware that request/response bodies may contain sensitive information. Use with caution in production.
+- **Dependencies:** Keep dependencies up to date to avoid known vulnerabilities. Run `npm audit` regularly.
+- **CORS:** The proxy sets permissive CORS headers for development. For production, restrict origins as needed.
+
+---
+
+## Performance Tips
+
+- **Model Selection:** Use quantized models (e.g., Q4_K_M) for faster inference and lower memory usage.
+- **Hardware:** Run both proxy and llama-server on machines with sufficient CPU and RAM. For large models, consider using machines with AVX2/AVX512 support.
+- **Local Networking:** Keep proxy and llama-server on the same host or LAN to minimize latency.
+- **Streaming:** Use streaming mode for chat completions to improve responsiveness in VS Code Copilot.
+- **Resource Monitoring:** Monitor system load and memory usage. Use tools like `htop` or `top` to identify bottlenecks.
+- **Node.js Tuning:** For heavy loads, consider running the proxy with Node.js process managers (e.g., PM2) and tuning Node.js memory limits (`--max-old-space-size`).
+- **Upstream Optimization:** Ensure llama-server is started with optimal flags for your model and workload (see llama.cpp docs for details).
+
+---
+
+## FAQ
+
+**Q: Can I use this proxy with any LLM model?**
+A: The proxy works with llama.cpp-compatible models that support OpenAI function calling format and chat templates. For best results, use models with tool support and start llama-server with `--jinja`.
+
+**Q: Does this proxy support streaming responses?**
+A: Yes, it maintains server-sent events for real-time streaming, compatible with VS Code Copilot.
+
+**Q: How do I add custom tools?**
+A: Define tools in your Copilot payload using OpenAI function calling schema. The proxy auto-patches missing `parameters` objects.
+
+**Q: What ports does the proxy use?**
+A: By default, the proxy listens on `11434` and forwards to llama-server on `11433`. You can change these with environment variables.
+
+**Q: How do I debug issues?**
+A: Enable verbose logging (`VERBOSE=1`) and check both proxy and llama-server logs. See the Advanced Troubleshooting section for more tips.
+
+**Q: Is this production-ready?**
+A: The proxy is designed for local development and experimentation. For production, review security, performance, and reliability considerations.
+
+---
+
+## References & Further Reading
+
+- [GitHub Copilot Documentation](https://docs.github.com/en/copilot)
+- [llama.cpp Function Calling](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md)
+- [llama.cpp Supported Chat Templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template)
+- [llama.cpp Main Repository](https://github.com/ggml-org/llama.cpp)
+- [Node.js http-proxy](https://github.com/http-party/node-http-proxy)
+- [Express.js Middleware Guide](https://expressjs.com/en/guide/using-middleware.html)
+- [VS Code Copilot Settings](https://docs.github.com/en/copilot/configuring-copilot)
+
+---
