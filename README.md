@@ -1,3 +1,21 @@
+## Installation
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/thosoo/llama-copilot-proxy.git
+   cd llama-copilot-proxy
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Ignore node_modules in git:**
+   The repository includes a `.gitignore` file that excludes `node_modules` from version control.
+
+---
+
 # Copilot BYOK → Ollama → llama-server Integration Proxy
 
 This proxy bridges VS Code Copilot's BYOK (Bring Your Own Key) feature with local llama-server instances, handling API endpoint translation and tool-calling compatibility.

@@ -9,11 +9,16 @@
     "test": "node test/inject-capabilities.test.js"
   },
   "dependencies": {
-    "express": "^4.18.0",
-    "node-fetch": "^3.3.0",
-    "http-proxy": "^1.18.1"
+    "express": "^4.21.2",
+    "http-proxy": "^1.18.1",
+    "node-fetch": "^3.3.2"
   },
-  "keywords": ["copilot", "llama", "proxy", "ai"],
+  "keywords": [
+    "copilot",
+    "llama",
+    "proxy",
+    "ai"
+  ],
   "author": "",
   "license": "MIT"
 }

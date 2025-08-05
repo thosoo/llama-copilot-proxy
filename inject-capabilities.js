@@ -1,4 +1,7 @@
 import express from 'express';
+// Helper for verbose logging
+const verboseLog = (...args) => { if (process.env.VERBOSE) console.log(...args); };
+const verboseError = (...args) => { if (process.env.VERBOSE) console.error(...args); };
 import fetch from 'node-fetch';
 import http from 'node:http';
 import { pipeline } from 'node:stream';
@@ -26,11 +29,11 @@ app.use((req, res, next) => {
     if (req.originalUrl === '/api/chat') {
       req.url = '/v1/chat/completions';
       req.originalUrl = '/v1/chat/completions';
-      console.log('🔄 Rewrote /api/chat → /v1/chat/completions');
+      verboseLog('🔄 Rewrote /api/chat → /v1/chat/completions');
     } else if (req.originalUrl === '/api/generate') {
       req.url = '/v1/completions';
       req.originalUrl = '/v1/completions';
-      console.log('🔄 Rewrote /api/generate → /v1/completions');
+      verboseLog('🔄 Rewrote /api/generate → /v1/completions');
     }
   }
   next();
@@ -40,12 +43,12 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   // Log rewritten path if applicable
   if (req.method === 'POST' && (req.originalUrl === '/v1/chat/completions' || req.originalUrl === '/v1/completions')) {
-    console.log(`�️ [${req.method}] Rewritten path: ${req.originalUrl}`);
+    verboseLog(`�️ [${req.method}] Rewritten path: ${req.originalUrl}`);
   } else {
-    console.log(`�🔍 [${req.method}] ${req.originalUrl} - User-Agent: ${req.headers['user-agent'] || 'unknown'}`);
+    verboseLog(`�🔍 [${req.method}] ${req.originalUrl} - User-Agent: ${req.headers['user-agent'] || 'unknown'}`);
   }
   if (req.body && Object.keys(req.body).length > 0) {
-    console.log(`🔍 Request body:`, JSON.stringify(req.body, null, 2));
+    verboseLog(`🔍 Request body:`, JSON.stringify(req.body, null, 2));
   }
   next();
 });
@@ -103,17 +106,17 @@ const jsonRoutes = [
 
 jsonRoutes.forEach(([method, path]) => {
   app[method.toLowerCase()](path, async (req, res) => {
-    console.log(`[${method}] Proxying ${path} -> ${UPSTREAM}${path}`);
+    verboseLog(`[${method}] Proxying ${path} -> ${UPSTREAM}${path}`);
     let body = req.body;
     if (method === 'POST') {
       // Check if this request contains tools (which would be wrong for /api/show)
       if (path === '/api/show' && body && Array.isArray(body.tools)) {
-        console.error(`🚨 ERROR: /api/show received request with tools! This should not happen!`);
-        console.error(`🚨 Tools found:`, JSON.stringify(body.tools, null, 2));
-        console.error(`🚨 Full body:`, JSON.stringify(body, null, 2));
+        verboseError(`🚨 ERROR: /api/show received request with tools! This should not happen!`);
+        verboseError(`🚨 Tools found:`, JSON.stringify(body.tools, null, 2));
+        verboseError(`🚨 Full body:`, JSON.stringify(body, null, 2));
       }
       // Pretty-print for logs, but minify for upstream
-      console.log(`[${method}] Request body:`, JSON.stringify(body, null, 2));
+      verboseLog(`[${method}] Request body:`, JSON.stringify(body, null, 2));
       // Note: Tools are passed through unchanged - llama.cpp expects OpenAI format
     }
     try {
@@ -125,7 +128,7 @@ jsonRoutes.forEach(([method, path]) => {
       });
       const data = await upstreamRes.json();
       // Pretty-print upstream response for logs
-      console.log(`[${method}] Upstream response for ${path}:`, JSON.stringify(data, null, 2));
+      verboseLog(`[${method}] Upstream response for ${path}:`, JSON.stringify(data, null, 2));
       res.json(path === '/api/tags' ? data : patch(data));
     } catch (err) {
       console.error(`[${method}] Proxy error for ${path}:`, err);
@@ -137,21 +140,21 @@ jsonRoutes.forEach(([method, path]) => {
 // Streaming chat completions with tool‑schema fix
 
 app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
-  console.log(`[POST] Proxying chat completion: ${req.originalUrl}`);
-  console.log(`[POST] Headers:`, req.headers);
+  verboseLog(`[POST] Proxying chat completion: ${req.originalUrl}`);
+  verboseLog(`[POST] Headers:`, req.headers);
   let body = (typeof req.body === 'object' && req.body !== null) ? req.body : {};
   if (Array.isArray(body.tools)) {
     // Log the full tool-calling request body for schema validation
-    console.log(`[POST] Full tool-calling request body:`, JSON.stringify(body, null, 2));
+    verboseLog(`[POST] Full tool-calling request body:`, JSON.stringify(body, null, 2));
     // Patch tools array for missing parameters
     body.tools = patchToolsArray(body.tools);
     // Minify tools block for logs and upstream
     const minifiedTools = JSON.stringify(body.tools);
-    console.log(`[POST] Minified tools (patched):`, minifiedTools);
+    verboseLog(`[POST] Minified tools (patched):`, minifiedTools);
   }
   // Always minify payload for upstream
   const payload = JSON.stringify(body);
-  console.log(`[POST] Upstream payload (minified):`, payload);
+  verboseLog(`[POST] Upstream payload (minified):`, payload);
   const upstreamReq = http.request(`${UPSTREAM}${req.originalUrl}`, {
     method: 'POST',
     headers: { 
@@ -160,8 +163,8 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
       'Accept': 'text/event-stream, application/json'
     }
   }, upRes => {
-    console.log(`[POST] Upstream response status: ${upRes.statusCode}`);
-    console.log(`[POST] Upstream response headers:`, upRes.headers);
+    verboseLog(`[POST] Upstream response status: ${upRes.statusCode}`);
+    verboseLog(`[POST] Upstream response headers:`, upRes.headers);
     
     // Check if this is a streaming response
     const isStreaming = upRes.headers['content-type']?.includes('text/event-stream');
@@ -197,21 +200,21 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
         if (err) {
           const isClientDisconnect = ['ECONNRESET', 'EPIPE', 'ECONNABORTED', 'ENOTFOUND', 'ETIMEDOUT'].includes(err.code);
           if (isClientDisconnect) {
-            console.log(`[POST] Client disconnected from ${req.originalUrl}: ${err.code}`);
+            verboseLog(`[POST] Client disconnected from ${req.originalUrl}: ${err.code}`);
           } else {
             console.error(`[POST] Pipeline error for ${req.originalUrl}:`, err);
           }
         } else {
-          console.log(`[POST] Response piped to client for ${req.originalUrl}`);
+          verboseLog(`[POST] Response piped to client for ${req.originalUrl}`);
         }
       });
     } else {
-      console.warn(`[POST] Skipped piping: client response already closed for ${req.originalUrl}`);
+      verboseLog(`[POST] Skipped piping: client response already closed for ${req.originalUrl}`);
     }
   });
   
   upstreamReq.on('error', (err) => {
-    console.error(`[POST] Upstream request error for ${req.originalUrl}:`, err);
+    verboseError(`[POST] Upstream request error for ${req.originalUrl}:`, err);
     if (!res.headersSent) {
       res.status(502).json({ error: 'upstream_connection_error', message: err.message });
     }
@@ -219,15 +222,15 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
 
   // Log client disconnection (but don't destroy upstream - let pipeline handle it)
   req.on('close', () => {
-    console.log(`[POST] Client closed connection for ${req.originalUrl}`);
+    verboseLog(`[POST] Client closed connection for ${req.originalUrl}`);
   });
 
   req.on('error', (err) => {
     const isClientDisconnect = ['ECONNRESET', 'EPIPE', 'ECONNABORTED'].includes(err.code);
     if (isClientDisconnect) {
-      console.log(`[POST] Client connection error for ${req.originalUrl}: ${err.code}`);
+      verboseLog(`[POST] Client connection error for ${req.originalUrl}: ${err.code}`);
     } else {
-      console.error(`[POST] Client request error for ${req.originalUrl}:`, err);
+      verboseError(`[POST] Client request error for ${req.originalUrl}:`, err);
     }
     // Let the pipeline handle cleanup naturally rather than forcing destroy
   });
@@ -244,18 +247,18 @@ app.post('/debug/json', (req, res) => {
 
 // Fallback proxy with JSON minification for tools
 app.use((req, res) => {
-  console.log(`🚨 [${req.method}] FALLBACK proxy for ${req.url} -> ${UPSTREAM}${req.url}`);
-  console.log(`🚨 Headers:`, req.headers);
+  verboseLog(`🚨 [${req.method}] FALLBACK proxy for ${req.url} -> ${UPSTREAM}${req.url}`);
+  verboseLog(`🚨 Headers:`, req.headers);
   
   // Check if this is a POST request with tools that needs minification
   if (req.method === 'POST' && req.body && Array.isArray(req.body.tools)) {
-    console.log(`🚨 FALLBACK detected tools - MINIFYING & PATCHING!`);
+    verboseLog(`🚨 FALLBACK detected tools - MINIFYING & PATCHING!`);
     req.body.tools = patchToolsArray(req.body.tools);
     const minifiedTools = JSON.stringify(req.body.tools);
-    console.log(`🚨 Minified tools (patched):`, minifiedTools);
+    verboseLog(`🚨 Minified tools (patched):`, minifiedTools);
     // Minify the JSON for upstream
     const minifiedPayload = JSON.stringify(req.body);
-    console.log(`🚨 Minified fallback payload:`, minifiedPayload);
+    verboseLog(`🚨 Minified fallback payload:`, minifiedPayload);
     // Create a custom request to upstream with minified JSON
     const upstreamReq = http.request(`${UPSTREAM}${req.url}`, {
       method: 'POST',
@@ -265,8 +268,8 @@ app.use((req, res) => {
         'Accept': 'text/event-stream, application/json'
       }
     }, upRes => {
-      console.log(`🚨 FALLBACK upstream response status: ${upRes.statusCode}`);
-      console.log(`🚨 FALLBACK upstream response headers:`, upRes.headers);
+      verboseLog(`🚨 FALLBACK upstream response status: ${upRes.statusCode}`);
+      verboseLog(`🚨 FALLBACK upstream response headers:`, upRes.headers);
       
       // Set proper headers for streaming
       const responseHeaders = { ...upRes.headers };
@@ -277,13 +280,13 @@ app.use((req, res) => {
       res.writeHead(upRes.statusCode || 500, responseHeaders);
       pipeline(upRes, res, (err) => {
         if (err) {
-          console.error(`🚨 FALLBACK pipeline error:`, err);
+          verboseError(`🚨 FALLBACK pipeline error:`, err);
         }
       });
     });
     
     upstreamReq.on('error', (err) => {
-      console.error(`🚨 FALLBACK upstream request error:`, err);
+      verboseError(`🚨 FALLBACK upstream request error:`, err);
       if (!res.headersSent) {
         res.status(502).json({ error: 'upstream_connection_error', message: err.message });
       }
@@ -294,7 +297,7 @@ app.use((req, res) => {
   } else {
     // Regular fallback for non-tool requests
     if (req.body && Object.keys(req.body).length > 0) {
-      console.log(`🚨 FALLBACK body (regular):`, JSON.stringify(req.body, null, 2));
+      verboseLog(`🚨 FALLBACK body (regular):`, JSON.stringify(req.body, null, 2));
     }
     proxy.web(req, res, { target: `${UPSTREAM}${req.url}` }); // Regular proxying for non-tool requests
   }
