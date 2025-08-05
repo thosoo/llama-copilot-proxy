@@ -1,3 +1,33 @@
+## Docker Compose Support
+
+You can use Docker Compose to run both the proxy and a llama-server together. This is ideal for local development and testing.
+
+### Quick Start
+1. Place your GGUF model file in a `models/` directory at the project root.
+2. Build and start both services:
+   ```bash
+   docker compose up --build
+   ```
+3. The proxy will be available at `http://localhost:11434` and will forward requests to the llama-server at `http://llama-server:11433`.
+
+### Customizing Model Path
+- Edit `docker-compose.yml` to change the model path or llama-server options as needed.
+- Example:
+  ```yaml
+  command: ["llama-server", "--model", "/models/your-model.gguf", "--port", "11433", "--jinja"]
+  volumes:
+    - ./models:/models
+  ```
+
+### Stopping Services
+```bash
+docker compose down
+```
+
+### Healthchecks
+- Both services include healthchecks for robust startup and dependency management.
+
+---
 ---
 ## Version
 
@@ -17,7 +47,53 @@ Current version: **1.0.0**
    npm install
    ```
 
-3. **Ignore node_modules in git:**
+
+## Docker Support
+
+You can run the proxy in a Docker container for both development and production. The provided multi-stage Dockerfile supports Node.js 18+ and exposes port 11434 by default.
+
+### Build the Docker image (production)
+```bash
+docker build -t llama-copilot-proxy:latest .
+```
+
+### Run the container (production)
+```bash
+docker run -d --name llama-copilot-proxy -p 11434:11434 llama-copilot-proxy:latest
+```
+
+#### Enable verbose logging
+```bash
+docker run -d --name llama-copilot-proxy -p 11434:11434 -e VERBOSE=1 llama-copilot-proxy:latest
+```
+
+#### Change upstream server or port
+```bash
+docker run -d --name llama-copilot-proxy -p 11434:11434 -e UPSTREAM=http://host.docker.internal:11433 llama-copilot-proxy:latest
+```
+
+### Build the Docker image (development)
+```bash
+docker build --target dev -t llama-copilot-proxy:dev .
+```
+
+### Run tests inside the container
+```bash
+docker run --rm llama-copilot-proxy:dev npm test
+```
+
+### Stopping and removing the container
+```bash
+docker stop llama-copilot-proxy && docker rm llama-copilot-proxy
+```
+
+### Notes
+- The container exposes port 11434 by default. You can change this with the `LISTEN_PORT` environment variable.
+- For local development, use `host.docker.internal` to connect to services running on your host machine (e.g., llama-server).
+- The `.dockerignore` file ensures your image is small and efficient.
+- For multi-service setups, consider using Docker Compose.
+
+---
    The repository includes a `.gitignore` file that excludes `node_modules` from version control.
 
 ---

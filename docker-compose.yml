@@ -1,0 +1,32 @@
+version: '3.8'
+services:
+  llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:latest # Placeholder image, replace with your own if needed
+    command: ["llama-server", "--model", "/models/model.gguf", "--port", "11433", "--jinja"]
+    ports:
+      - "11433:11433"
+    volumes:
+      - ./models:/models # Mount your models directory
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11433/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  proxy:
+    build:
+      context: .
+      target: prod
+    ports:
+      - "11434:11434"
+    environment:
+      - UPSTREAM=http://llama-server:11433
+      - VERBOSE=1
+    depends_on:
+      llama-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

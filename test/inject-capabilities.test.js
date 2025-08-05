@@ -1,4 +1,4 @@
-const assert = require('assert');
+import assert from 'assert';
 
 function minifyJSON(obj) {
   return JSON.stringify(obj);
@@ -63,14 +63,6 @@ function testMinifyNestedArraysObjects() {
   console.log('Test 3 passed: minify nested arrays and objects');
 }
 
-function runTests() {
-  testMinifySimpleObject();
-  testMinifyComplexToolsArray();
-  testMinifyNestedArraysObjects();
-  testMinifyMultilineStringPayload();
-  testMinifyRealUpstreamPayload();
-  console.log('All tests passed.');
-}
 function testMinifyMultilineStringPayload() {
   const obj = {
     messages: [
@@ -123,6 +115,16 @@ function testMinifyRealUpstreamPayload() {
   console.log('Test 5 passed: minify real upstream payload');
 }
 
-if (require.main === module) {
+function runTests() {
+  testMinifySimpleObject();
+  testMinifyComplexToolsArray();
+  testMinifyNestedArraysObjects();
+  testMinifyMultilineStringPayload();
+  testMinifyRealUpstreamPayload();
+  console.log('All tests passed.');
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
   runTests();
 }
+
