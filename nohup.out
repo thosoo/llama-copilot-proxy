@@ -1,0 +1,258 @@
+Proxy listening on http://127.0.0.1:11434
+Upstream target: http://127.0.0.1:11433
+Configure VS Code to use: http://127.0.0.1:11434
+Instead of: http://127.0.0.1:11433
+�️ [POST] Rewritten path: /v1/chat/completions
+🔍 Request body: {
+  "model": "llama",
+  "messages": [
+    {
+      "role": "user",
+      "content": "search for files"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "grep_search",
+        "description": "Search for files",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Glob pattern to search for."
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        }
+      }
+    }
+  ]
+}
+[POST] Proxying chat completion: /v1/chat/completions
+[POST] Headers: {
+  host: '127.0.0.1:11434',
+  'user-agent': 'curl/8.5.0',
+  accept: '*/*',
+  'content-type': 'application/json',
+  'content-length': '338'
+}
+[POST] Full tool-calling request body: {
+  "model": "llama",
+  "messages": [
+    {
+      "role": "user",
+      "content": "search for files"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "grep_search",
+        "description": "Search for files",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Glob pattern to search for."
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        }
+      }
+    }
+  ]
+}
+[POST] Minified tools (patched): [{"type":"function","function":{"name":"grep_search","description":"Search for files","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to search for."}},"required":["pattern"]}}}]
+[POST] Upstream payload (minified): {"model":"llama","messages":[{"role":"user","content":"search for files"}],"tools":[{"type":"function","function":{"name":"grep_search","description":"Search for files","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to search for."}},"required":["pattern"]}}}]}
+[POST] Client closed connection for /v1/chat/completions
+[POST] Upstream response status: 200
+[POST] Upstream response headers: {
+  'keep-alive': 'timeout=5, max=100',
+  'content-type': 'application/json; charset=utf-8',
+  server: 'llama.cpp',
+  'content-length': '1485',
+  'access-control-allow-origin': ''
+}
+node:internal/streams/pipeline:264
+        throw new ERR_STREAM_UNABLE_TO_PIPE();
+        ^
+
+Error [ERR_STREAM_UNABLE_TO_PIPE]: Cannot pipe to a closed or destroyed stream
+    at pipelineImpl (node:internal/streams/pipeline:264:15)
+    at pipeline (node:internal/streams/pipeline:183:10)
+    at ClientRequest.<anonymous> (file:///home/thaison/llama-copilot-proxy/inject-capabilities.js:189:5)
+    at Object.onceWrapper (node:events:622:26)
+    at ClientRequest.emit (node:events:507:28)
+    at HTTPParser.parserOnIncomingClient [as onIncoming] (node:_http_client:716:27)
+    at HTTPParser.parserOnHeadersComplete (node:_http_common:117:17)
+    at Socket.socketOnData (node:_http_client:558:22)
+    at Socket.emit (node:events:507:28)
+    at addChunk (node:internal/streams/readable:559:12) {
+  code: 'ERR_STREAM_UNABLE_TO_PIPE'
+}
+
+Node.js v24.3.0
+Proxy listening on http://127.0.0.1:11434
+Upstream target: http://127.0.0.1:11433
+Configure VS Code to use: http://127.0.0.1:11434
+Instead of: http://127.0.0.1:11433
+�️ [POST] Rewritten path: /v1/chat/completions
+🔍 Request body: {
+  "model": "llama",
+  "messages": [
+    {
+      "role": "user",
+      "content": "search for files"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "grep_search",
+        "description": "Search for files",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Glob pattern to search for."
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        }
+      }
+    }
+  ]
+}
+[POST] Proxying chat completion: /v1/chat/completions
+[POST] Headers: {
+  host: '127.0.0.1:11434',
+  'user-agent': 'curl/8.5.0',
+  accept: '*/*',
+  'content-type': 'application/json',
+  'content-length': '338'
+}
+[POST] Full tool-calling request body: {
+  "model": "llama",
+  "messages": [
+    {
+      "role": "user",
+      "content": "search for files"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "grep_search",
+        "description": "Search for files",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Glob pattern to search for."
+            }
+          },
+          "required": [
+            "pattern"
+          ]
+        }
+      }
+    }
+  ]
+}
+[POST] Minified tools (patched): [{"type":"function","function":{"name":"grep_search","description":"Search for files","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to search for."}},"required":["pattern"]}}}]
+[POST] Upstream payload (minified): {"model":"llama","messages":[{"role":"user","content":"search for files"}],"tools":[{"type":"function","function":{"name":"grep_search","description":"Search for files","parameters":{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern to search for."}},"required":["pattern"]}}}]}
+[POST] Client closed connection for /v1/chat/completions
+[POST] Upstream response status: 200
+[POST] Upstream response headers: {
+  'keep-alive': 'timeout=5, max=100',
+  'content-type': 'application/json; charset=utf-8',
+  server: 'llama.cpp',
+  'content-length': '1161',
+  'access-control-allow-origin': ''
+}
+[POST] Response piped to client for /v1/chat/completions
+Proxy listening on http://127.0.0.1:11434
+Upstream target: http://127.0.0.1:11433
+Configure VS Code to use: http://127.0.0.1:11434
+Instead of: http://127.0.0.1:11433
+�🔍 [POST] /api/show - User-Agent: GitHubCopilotChat/0.29.1
+🔍 Request body: {
+  "model": "/home/thaison/.cache/llama.cpp/DavidAU_Qwen3-4B-Q8_0-64k-128k-256k-context-GGUF_Qwen3-4B-Q8_0-128k.gguf"
+}
+[POST] Proxying /api/show -> http://127.0.0.1:11433/api/show
+[POST] Request body: {
+  "model": "/home/thaison/.cache/llama.cpp/DavidAU_Qwen3-4B-Q8_0-64k-128k-256k-context-GGUF_Qwen3-4B-Q8_0-128k.gguf"
+}
+[POST] Proxy error for /api/show: FetchError: request to http://127.0.0.1:11433/api/show failed, reason: connect ECONNREFUSED 127.0.0.1:11433
+    at ClientRequest.<anonymous> (file:///home/thaison/node_modules/node-fetch/src/index.js:108:11)
+    at ClientRequest.emit (node:events:519:35)
+    at emitErrorEvent (node:_http_client:104:11)
+    at Socket.socketErrorListener (node:_http_client:518:5)
+    at Socket.emit (node:events:507:28)
+    at emitErrorNT (node:internal/streams/destroy:170:8)
+    at emitErrorCloseNT (node:internal/streams/destroy:129:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+  type: 'system',
+  errno: 'ECONNREFUSED',
+  code: 'ECONNREFUSED',
+  erroredSysCall: 'connect'
+}
+�🔍 [POST] /api/show - User-Agent: GitHubCopilotChat/0.29.1
+🔍 Request body: {
+  "model": "/home/thaison/.cache/llama.cpp/DavidAU_Qwen3-4B-Q8_0-64k-128k-256k-context-GGUF_Qwen3-4B-Q8_0-128k.gguf"
+}
+[POST] Proxying /api/show -> http://127.0.0.1:11433/api/show
+[POST] Request body: {
+  "model": "/home/thaison/.cache/llama.cpp/DavidAU_Qwen3-4B-Q8_0-64k-128k-256k-context-GGUF_Qwen3-4B-Q8_0-128k.gguf"
+}
+[POST] Proxy error for /api/show: FetchError: request to http://127.0.0.1:11433/api/show failed, reason: connect ECONNREFUSED 127.0.0.1:11433
+    at ClientRequest.<anonymous> (file:///home/thaison/node_modules/node-fetch/src/index.js:108:11)
+    at ClientRequest.emit (node:events:519:35)
+    at emitErrorEvent (node:_http_client:104:11)
+    at Socket.socketErrorListener (node:_http_client:518:5)
+    at Socket.emit (node:events:507:28)
+    at emitErrorNT (node:internal/streams/destroy:170:8)
+    at emitErrorCloseNT (node:internal/streams/destroy:129:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+  type: 'system',
+  errno: 'ECONNREFUSED',
+  code: 'ECONNREFUSED',
+  erroredSysCall: 'connect'
+}
+�🔍 [POST] /api/show - User-Agent: GitHubCopilotChat/0.29.1
+🔍 Request body: {
+  "model": "/home/thaison/.cache/llama.cpp/DavidAU_Qwen3-4B-Q8_0-64k-128k-256k-context-GGUF_Qwen3-4B-Q8_0-128k.gguf"
+}
+[POST] Proxying /api/show -> http://127.0.0.1:11433/api/show
+[POST] Request body: {
+  "model": "/home/thaison/.cache/llama.cpp/DavidAU_Qwen3-4B-Q8_0-64k-128k-256k-context-GGUF_Qwen3-4B-Q8_0-128k.gguf"
+}
+[POST] Proxy error for /api/show: FetchError: request to http://127.0.0.1:11433/api/show failed, reason: connect ECONNREFUSED 127.0.0.1:11433
+    at ClientRequest.<anonymous> (file:///home/thaison/node_modules/node-fetch/src/index.js:108:11)
+    at ClientRequest.emit (node:events:519:35)
+    at emitErrorEvent (node:_http_client:104:11)
+    at Socket.socketErrorListener (node:_http_client:518:5)
+    at Socket.emit (node:events:507:28)
+    at emitErrorNT (node:internal/streams/destroy:170:8)
+    at emitErrorCloseNT (node:internal/streams/destroy:129:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:90:21) {
+  type: 'system',
+  errno: 'ECONNREFUSED',
+  code: 'ECONNREFUSED',
+  erroredSysCall: 'connect'
+}

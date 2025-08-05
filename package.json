@@ -1,0 +1,19 @@
+{
+  "name": "llama-copilot-proxy",
+  "version": "1.0.0",
+  "description": "Proxy server for VS Code Copilot to llama-server integration",
+  "type": "module",
+  "main": "inject-capabilities.js",
+  "scripts": {
+    "start": "node inject-capabilities.js",
+    "test": "node test/inject-capabilities.test.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0",
+    "node-fetch": "^3.3.0",
+    "http-proxy": "^1.18.1"
+  },
+  "keywords": ["copilot", "llama", "proxy", "ai"],
+  "author": "",
+  "license": "MIT"
+}

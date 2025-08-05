@@ -1,0 +1,1 @@
+{"error":{"code":500,"message":"Failed to parse tools: [json.exception.out_of_range.403] key 'parameters' not found; tools = [\n  {\n    \"type\": \"function\",\n    \"function\": {\n      \"name\": \"getWeather\",\n      \"description\": \"Get weather info\"\n    }\n  }\n]","type":"server_error"}}
