@@ -1,5 +1,5 @@
 import express from 'express';
-// Helper for verbose logging
+// Helper for verbose logging (now always logs)
 const verboseLog = (...args) => { if (process.env.VERBOSE) console.log(...args); };
 const verboseError = (...args) => { if (process.env.VERBOSE) console.error(...args); };
 import fetch from 'node-fetch';
@@ -45,15 +45,28 @@ app.use((req, res, next) => {
 });
 
 // Add middleware to log ALL requests
+const jsonEndpointSet = new Set([
+  '/api/models',
+  '/api/show',
+  '/v1/models',
+  '/api/tags'
+]);
 app.use((req, res, next) => {
-  // Log rewritten path if applicable
-  if (req.method === 'POST' && (req.originalUrl === '/v1/chat/completions' || req.originalUrl === '/v1/completions')) {
-    verboseLog(`�️ [${req.method}] Rewritten path: ${req.originalUrl}`);
+  // Always log routing
+  if (req.method === 'POST' && (req.originalUrl === '/v1/chat/completions' || req.originalUrl === '/v1/completions' || req.originalUrl.match(/^(\/)?(v1\/)?chat\/completions$/))) {
+    console.log(`➡️ [${req.method}] Routed to: ${req.originalUrl}`);
+    if (process.env.VERBOSE && req.body && Object.keys(req.body).length > 0) {
+      console.log(`📦 Request body:`, JSON.stringify(req.body, null, 2));
+    }
+  } else if (req.method === 'POST' && !jsonEndpointSet.has(req.originalUrl)) {
+    // Fallback POSTs (not JSON endpoints)
+    console.log(`🔄 [${req.method}] Routing: ${req.originalUrl} - User-Agent: ${req.headers['user-agent'] || 'unknown'}`);
+    if (process.env.VERBOSE && req.body && Object.keys(req.body).length > 0) {
+      console.log(`📦 Request body:`, JSON.stringify(req.body, null, 2));
+    }
   } else {
-    verboseLog(`�🔍 [${req.method}] ${req.originalUrl} - User-Agent: ${req.headers['user-agent'] || 'unknown'}`);
-  }
-  if (req.body && Object.keys(req.body).length > 0) {
-    verboseLog(`🔍 Request body:`, JSON.stringify(req.body, null, 2));
+    // GETs and JSON endpoints: only log routing, not body
+    console.log(`🔄 [${req.method}] Routing: ${req.originalUrl} - User-Agent: ${req.headers['user-agent'] || 'unknown'}`);
   }
   next();
 });
@@ -111,17 +124,16 @@ const jsonRoutes = [
 
 jsonRoutes.forEach(([method, path]) => {
   app[method.toLowerCase()](path, async (req, res) => {
-    verboseLog(`[${method}] Proxying ${path} -> ${UPSTREAM}${path}`);
+    console.log(`[${method}] Proxying ${path} -> ${UPSTREAM}${path}`);
     let body = req.body;
     if (method === 'POST') {
       // Check if this request contains tools (which would be wrong for /api/show)
       if (path === '/api/show' && body && Array.isArray(body.tools)) {
-        verboseError(`🚨 ERROR: /api/show received request with tools! This should not happen!`);
-        verboseError(`🚨 Tools found:`, JSON.stringify(body.tools, null, 2));
-        verboseError(`🚨 Full body:`, JSON.stringify(body, null, 2));
+        console.error(`🚨 ERROR: /api/show received request with tools! This should not happen!`);
+        console.error(`🚨 Tools found:`, JSON.stringify(body.tools, null, 2));
+        console.error(`🚨 Full body:`, JSON.stringify(body, null, 2));
       }
-      // Pretty-print for logs, but minify for upstream
-      verboseLog(`[${method}] Request body:`, JSON.stringify(body, null, 2));
+      // Do NOT log request body for JSON endpoints
       // Note: Tools are passed through unchanged - llama.cpp expects OpenAI format
     }
     try {
@@ -133,7 +145,7 @@ jsonRoutes.forEach(([method, path]) => {
       });
       const data = await upstreamRes.json();
       // Pretty-print upstream response for logs
-      verboseLog(`[${method}] Upstream response for ${path}:`, JSON.stringify(data, null, 2));
+      console.log(`[${method}] Upstream response for ${path}:`, JSON.stringify(data, null, 2));
       res.json(path === '/api/tags' ? data : patch(data));
     } catch (err) {
       console.error(`[${method}] Proxy error for ${path}:`, err);
@@ -145,21 +157,21 @@ jsonRoutes.forEach(([method, path]) => {
 // Streaming chat completions with tool‑schema fix
 
 app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
-  verboseLog(`[POST] Proxying chat completion: ${req.originalUrl}`);
-  verboseLog(`[POST] Headers:`, req.headers);
+  console.log(`[POST] Proxying chat completion: ${req.originalUrl}`);
+  if (process.env.VERBOSE) console.log(`[POST] Headers:`, req.headers);
   let body = (typeof req.body === 'object' && req.body !== null) ? req.body : {};
   if (Array.isArray(body.tools)) {
     // Log the full tool-calling request body for schema validation
-    verboseLog(`[POST] Full tool-calling request body:`, JSON.stringify(body, null, 2));
+    if (process.env.VERBOSE) console.log(`[POST] Full tool-calling request body:`, JSON.stringify(body, null, 2));
     // Patch tools array for missing parameters
     body.tools = patchToolsArray(body.tools);
     // Minify tools block for logs and upstream
     const minifiedTools = JSON.stringify(body.tools);
-    verboseLog(`[POST] Minified tools (patched):`, minifiedTools);
+    if (process.env.VERBOSE) console.log(`[POST] Minified tools (patched):`, minifiedTools);
   }
   // Always minify payload for upstream
   const payload = JSON.stringify(body);
-  verboseLog(`[POST] Upstream payload (minified):`, payload);
+  if (process.env.VERBOSE) console.log(`[POST] Upstream payload (minified):`, payload);
   const upstreamReq = http.request(`${UPSTREAM}${req.originalUrl}`, {
     method: 'POST',
     headers: { 
@@ -219,7 +231,7 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
   });
   
   upstreamReq.on('error', (err) => {
-    verboseError(`[POST] Upstream request error for ${req.originalUrl}:`, err);
+    console.error(`[POST] Upstream request error for ${req.originalUrl}:`, err);
     if (!res.headersSent) {
       res.status(502).json({ error: 'upstream_connection_error', message: err.message });
     }
@@ -227,15 +239,15 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
 
   // Log client disconnection (but don't destroy upstream - let pipeline handle it)
   req.on('close', () => {
-    verboseLog(`[POST] Client closed connection for ${req.originalUrl}`);
+    if (process.env.VERBOSE) console.log(`[POST] Client closed connection for ${req.originalUrl}`);
   });
 
   req.on('error', (err) => {
     const isClientDisconnect = ['ECONNRESET', 'EPIPE', 'ECONNABORTED'].includes(err.code);
     if (isClientDisconnect) {
-      verboseLog(`[POST] Client connection error for ${req.originalUrl}: ${err.code}`);
+      if (process.env.VERBOSE) console.log(`[POST] Client connection error for ${req.originalUrl}: ${err.code}`);
     } else {
-      verboseError(`[POST] Client request error for ${req.originalUrl}:`, err);
+      if (process.env.VERBOSE) console.error(`[POST] Client request error for ${req.originalUrl}:`, err);
     }
     // Let the pipeline handle cleanup naturally rather than forcing destroy
   });
@@ -252,18 +264,18 @@ app.post('/debug/json', (req, res) => {
 
 // Fallback proxy with JSON minification for tools
 app.use((req, res) => {
-  verboseLog(`🚨 [${req.method}] FALLBACK proxy for ${req.url} -> ${UPSTREAM}${req.url}`);
-  verboseLog(`🚨 Headers:`, req.headers);
+  console.log(`🚨 [${req.method}] FALLBACK proxy for ${req.url} -> ${UPSTREAM}${req.url}`);
+  if (process.env.VERBOSE) console.log(`🚨 Headers:`, req.headers);
   
   // Check if this is a POST request with tools that needs minification
   if (req.method === 'POST' && req.body && Array.isArray(req.body.tools)) {
-    verboseLog(`🚨 FALLBACK detected tools - MINIFYING & PATCHING!`);
+    if (process.env.VERBOSE) console.log(`🚨 FALLBACK detected tools - MINIFYING & PATCHING!`);
     req.body.tools = patchToolsArray(req.body.tools);
     const minifiedTools = JSON.stringify(req.body.tools);
-    verboseLog(`🚨 Minified tools (patched):`, minifiedTools);
+    if (process.env.VERBOSE) console.log(`🚨 Minified tools (patched):`, minifiedTools);
     // Minify the JSON for upstream
     const minifiedPayload = JSON.stringify(req.body);
-    verboseLog(`🚨 Minified fallback payload:`, minifiedPayload);
+    if (process.env.VERBOSE) console.log(`🚨 Minified fallback payload:`, minifiedPayload);
     // Create a custom request to upstream with minified JSON
     const upstreamReq = http.request(`${UPSTREAM}${req.url}`, {
       method: 'POST',
@@ -273,8 +285,8 @@ app.use((req, res) => {
         'Accept': 'text/event-stream, application/json'
       }
     }, upRes => {
-      verboseLog(`🚨 FALLBACK upstream response status: ${upRes.statusCode}`);
-      verboseLog(`🚨 FALLBACK upstream response headers:`, upRes.headers);
+      if (process.env.VERBOSE) console.log(`🚨 FALLBACK upstream response status: ${upRes.statusCode}`);
+      if (process.env.VERBOSE) console.log(`🚨 FALLBACK upstream response headers:`, upRes.headers);
       
       // Set proper headers for streaming
       const responseHeaders = { ...upRes.headers };
@@ -284,14 +296,14 @@ app.use((req, res) => {
       
       res.writeHead(upRes.statusCode || 500, responseHeaders);
       pipeline(upRes, res, (err) => {
-        if (err) {
-          verboseError(`🚨 FALLBACK pipeline error:`, err);
+        if (err && process.env.VERBOSE) {
+          console.error(`🚨 FALLBACK pipeline error:`, err);
         }
       });
     });
     
     upstreamReq.on('error', (err) => {
-      verboseError(`🚨 FALLBACK upstream request error:`, err);
+      if (process.env.VERBOSE) console.error(`🚨 FALLBACK upstream request error:`, err);
       if (!res.headersSent) {
         res.status(502).json({ error: 'upstream_connection_error', message: err.message });
       }
@@ -301,8 +313,8 @@ app.use((req, res) => {
     upstreamReq.end();
   } else {
     // Regular fallback for non-tool requests
-    if (req.body && Object.keys(req.body).length > 0) {
-      verboseLog(`🚨 FALLBACK body (regular):`, JSON.stringify(req.body, null, 2));
+    if (process.env.VERBOSE && req.body && Object.keys(req.body).length > 0) {
+      console.log(`🚨 FALLBACK body (regular):`, JSON.stringify(req.body, null, 2));
     }
     proxy.web(req, res, { target: `${UPSTREAM}${req.url}` }); // Regular proxying for non-tool requests
   }
