@@ -154,40 +154,57 @@ jsonRoutes.forEach(([method, path]) => {
   });
 });
 
-// Streaming chat completions with tool‑schema fix
+// Streaming chat completions with tool‑schema fix and deepseek thinking mode support
 
+import { Transform } from 'stream';
 app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
   console.log(`[POST] Proxying chat completion: ${req.originalUrl}`);
   if (process.env.VERBOSE) console.log(`[POST] Headers:`, req.headers);
   let body = (typeof req.body === 'object' && req.body !== null) ? req.body : {};
+  
+  // Estimate prompt length to warn about potential timeouts
+  let estimatedTokens = 0;
+  if (body.messages && Array.isArray(body.messages)) {
+    estimatedTokens = body.messages.reduce((acc, msg) => {
+      if (msg.content && typeof msg.content === 'string') {
+        return acc + Math.ceil(msg.content.length / 3); // Rough token estimation
+      }
+      return acc;
+    }, 0);
+    
+    if (estimatedTokens > 2000) {
+      console.log(`⚠️  [WARNING] Large prompt detected (~${estimatedTokens} tokens). This may cause timeout issues.`);
+      console.log(`⚠️  [TIP] Consider reducing context size or increasing timeout settings.`);
+    }
+  }
+  
   if (Array.isArray(body.tools)) {
-    // Log the full tool-calling request body for schema validation
     if (process.env.VERBOSE) console.log(`[POST] Full tool-calling request body:`, JSON.stringify(body, null, 2));
-    // Patch tools array for missing parameters
     body.tools = patchToolsArray(body.tools);
-    // Minify tools block for logs and upstream
     const minifiedTools = JSON.stringify(body.tools);
     if (process.env.VERBOSE) console.log(`[POST] Minified tools (patched):`, minifiedTools);
   }
-  // Always minify payload for upstream
   const payload = JSON.stringify(body);
   if (process.env.VERBOSE) console.log(`[POST] Upstream payload (minified):`, payload);
+  
+  let heartbeatInterval; // Declare heartbeat interval in function scope
+  
   const upstreamReq = http.request(`${UPSTREAM}${req.originalUrl}`, {
     method: 'POST',
-    headers: { 
-      'Content-Type': 'application/json', 
+    headers: {
+      'Content-Type': 'application/json',
       'Content-Length': Buffer.byteLength(payload),
       'Accept': 'text/event-stream, application/json'
     }
   }, upRes => {
     verboseLog(`[POST] Upstream response status: ${upRes.statusCode}`);
     verboseLog(`[POST] Upstream response headers:`, upRes.headers);
-    
-    // Check if this is a streaming response
     const isStreaming = upRes.headers['content-type']?.includes('text/event-stream');
     
+    // Log when we receive the first response from upstream
+    console.log(`✅ [INFO] Upstream responded (~${estimatedTokens} tokens prompt processed)`);
+    
     if (isStreaming) {
-      // Set explicit headers for streaming that Copilot expects
       res.writeHead(upRes.statusCode || 200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -195,25 +212,70 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'X-Accel-Buffering': 'no'  // Disable nginx buffering
+        'X-Accel-Buffering': 'no'
       });
-      
-      // Immediately flush headers and send a heartbeat to ensure connection is established
       res.flushHeaders();
       
-      // Send initial heartbeat comment to establish the stream
+      // Send multiple heartbeats to prevent timeout during long prompt processing
       res.write(': heartbeat\n\n');
-    } else {
-      // For non-streaming responses, copy headers but clean up problematic ones
-      const responseHeaders = { ...upRes.headers };
-      if (responseHeaders['content-encoding']) {
-        delete responseHeaders['content-encoding'];
+      res.write(': processing-prompt\n\n');
+      
+      // Send periodic heartbeats for any substantial prompt (even shorter ones can cause delays)
+      let heartbeatInterval;
+      if (estimatedTokens > 1000) {
+        console.log(`📡 [INFO] Setting up extended heartbeat for prompt (~${estimatedTokens} tokens)`);
+        heartbeatInterval = setInterval(() => {
+          if (!res.destroyed && !res.writableEnded) {
+            res.write(': heartbeat-extended\n\n');
+          } else {
+            clearInterval(heartbeatInterval);
+          }
+        }, 1500); // Heartbeat every 1.5 seconds for any substantial prompt
       }
-      res.writeHead(upRes.statusCode || 500, responseHeaders);
-    }
-    
-    if (!res.writableEnded && !res.destroyed) {
-      pipeline(upRes, res, (err) => {
+      // Transform stream to parse and emit reasoning_content as special SSE events
+      // This enables deepseek/qwen3 thinking mode for Copilot by exposing model reasoning
+      let buffer = '';
+      const thinkTransform = new Transform({
+        transform(chunk, encoding, callback) {
+          buffer += chunk.toString();
+          let output = '';
+          
+          // Process complete SSE data lines
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Keep incomplete line in buffer
+          
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.choices && data.choices[0] && data.choices[0].delta && data.choices[0].delta.reasoning_content) {
+                  // Emit reasoning content as special thinking event
+                  output += `event: thinking\ndata: ${JSON.stringify(data.choices[0].delta.reasoning_content)}\n\n`;
+                }
+              } catch (e) {
+                // Not valid JSON, pass through unchanged
+              }
+            }
+            // Pass through all original lines
+            output += line + '\n';
+          }
+          
+          callback(null, output);
+        },
+        flush(callback) {
+          if (buffer.length > 0) {
+            this.push(buffer);
+            buffer = '';
+          }
+          callback();
+        }
+      });
+      pipeline(upRes, thinkTransform, res, (err) => {
+        // Clean up heartbeat interval
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+        }
+        
         if (err) {
           const isClientDisconnect = ['ECONNRESET', 'EPIPE', 'ECONNABORTED', 'ENOTFOUND', 'ETIMEDOUT'].includes(err.code);
           if (isClientDisconnect) {
@@ -226,34 +288,55 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
         }
       });
     } else {
-      verboseLog(`[POST] Skipped piping: client response already closed for ${req.originalUrl}`);
+      // For non-streaming responses, parse and emit reasoning_content in JSON
+      let raw = '';
+      upRes.on('data', chunk => { raw += chunk.toString(); });
+      upRes.on('end', () => {
+        // Try to parse JSON and extract reasoning_content
+        let data;
+        try { data = JSON.parse(raw); } catch { data = raw; }
+        let thinking = null;
+        if (typeof data === 'object' && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.reasoning_content) {
+          thinking = data.choices[0].message.reasoning_content;
+          data.choices[0].message.thinking = thinking;
+        }
+        const responseHeaders = { ...upRes.headers };
+        if (responseHeaders['content-encoding']) {
+          delete responseHeaders['content-encoding'];
+        }
+        res.writeHead(upRes.statusCode || 500, responseHeaders);
+        res.end(JSON.stringify(data));
+      });
     }
   });
-  
   upstreamReq.on('error', (err) => {
     console.error(`[POST] Upstream request error for ${req.originalUrl}:`, err);
     if (!res.headersSent) {
       res.status(502).json({ error: 'upstream_connection_error', message: err.message });
     }
   });
-
-  // Log client disconnection (but don't destroy upstream - let pipeline handle it)
   req.on('close', () => {
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+    }
     if (process.env.VERBOSE) console.log(`[POST] Client closed connection for ${req.originalUrl}`);
   });
-
   req.on('error', (err) => {
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+    }
     const isClientDisconnect = ['ECONNRESET', 'EPIPE', 'ECONNABORTED'].includes(err.code);
     if (isClientDisconnect) {
       if (process.env.VERBOSE) console.log(`[POST] Client connection error for ${req.originalUrl}: ${err.code}`);
     } else {
       if (process.env.VERBOSE) console.error(`[POST] Client request error for ${req.originalUrl}:`, err);
     }
-    // Let the pipeline handle cleanup naturally rather than forcing destroy
   });
-
   upstreamReq.write(payload);
   upstreamReq.end();
+  
+  // Log that we've sent the request to upstream
+  console.log(`📤 [INFO] Sent request to upstream (~${estimatedTokens} tokens). Waiting for processing...`);
 });
 // Debug endpoint to inspect minified JSON payload
 app.post('/debug/json', (req, res) => {
@@ -324,7 +407,7 @@ const VERSION = '1.0.0';
 app.listen(LISTEN_PORT, '127.0.0.1', () => {
   console.log(`\n===========================================`);
   console.log(`🚀 Copilot BYOK → llama.cpp Integration Proxy 🚀`);
-  console.log(`Version: ${VERSION}`);
+  console.log(`Version: ${VERSION} (with DeepSeek Thinking Mode support)`);
   console.log(`A seamless bridge for VS Code Copilot and local llama.cpp (llama-server) with tool support.`);
   console.log(`===========================================\n`);
   console.log(`Proxy listening on http://127.0.0.1:${LISTEN_PORT}`);
