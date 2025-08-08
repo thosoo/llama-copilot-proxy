@@ -109,12 +109,12 @@ try {
       console.log('💡 This means VSCode Copilot will display the thinking process directly in the UI');
       console.log('');
       console.log('🔧 To use this mode with VSCode Copilot:');
-      console.log('   1. Restart proxy: THINKING_MODE=content node proxy-server.js');
+      console.log('   1. Restart proxy: THINKING_MODE=show_reasoning node proxy-server.js');
       console.log('   2. Use VSCode Copilot normally');
       console.log('   3. See thinking content appear directly in VSCode!');
     } else {
       console.log('❌ No thinking content found in content stream');
-      console.log('💡 Make sure the proxy is running with THINKING_MODE=content');
+      console.log('💡 Make sure the proxy is running with THINKING_MODE=show_reasoning');
     }
     
     process.exit(0);
@@ -129,7 +129,7 @@ try {
   console.error('❌ Request failed:', error.message);
   console.log('');
   console.log('🔍 Troubleshooting:');
-  console.log('- Make sure the proxy is running: THINKING_MODE=content node proxy-server.js');
+  console.log('- Make sure the proxy is running: THINKING_MODE=show_reasoning node proxy-server.js');
   console.log('- Check that deepseek-r1:1.5b model is available');
   console.log('- Verify the llama-server is running on port 11433');
   process.exit(1);

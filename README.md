@@ -356,22 +356,29 @@ curl -X POST http://127.0.0.1:11434/api/chat \
 
 
 ## Environment Variables
+### THINKING_MODE Details
+
+`default`: Standard Copilot protocol. Reasoning content is sent in the response, but **will NOT be displayed in the VS Code GUI**. This is the safest, most compatible mode for Copilot.
+
+`show_reasoning`: Routes reasoning content into the main content field, so VS Code Copilot displays the model's step-by-step thinking directly in the UI.
+
+`events`/`both`/`off`: See comments in `proxy-server.js` for details.
 
 - `VERBOSE=1` — Enable verbose logging (shows proxied JSONs and debug info)
 - `LISTEN_PORT` — Change the proxy listening port (default: 11434)
 - `LLAMA_SERVER_PORT` — Change the llama-server port (default: 11433)
 - `UPSTREAM` — Change the upstream llama-server URL (default: http://127.0.0.1:${LLAMA_SERVER_PORT})
 - `THINKING_MODE` — Control how "thinking" events are routed. Options:
-    - `vscode` (default): Standard reasoning_content for VSCode Copilot
+    - `default` (default): Standard reasoning_content for Copilot protocol (**reasoning hidden in VS Code GUI**)
     - `events`: Custom 'event: thinking' SSE events only
     - `both`: Both content and event streams
     - `off`: Disable thinking events
-    - `content`: Route thinking to normal content stream (VSCode will display it!)
+    - `show_reasoning`: Route thinking to normal content stream (VSCode will display it!)
 - `THINKING_DEBUG` — Enable debug mode for thinking events (`true` or `false`).
 
 Set environment variables before starting the proxy:
 ```bash
-VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=11433 THINKING_MODE=content THINKING_DEBUG=true node proxy-server.js
+VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=11433 THINKING_MODE=show_reasoning THINKING_DEBUG=true node proxy-server.js
 ```
 
 ---

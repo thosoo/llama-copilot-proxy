@@ -279,7 +279,7 @@ jsonRoutes.forEach(([method, path]) => {
 //   'events'  - Custom 'event: thinking' SSE events only
 //   'both'    - Both content and event streams
 //   'off'     - Disable thinking events
-//   'content' - Route thinking to normal content stream (VSCode will display it!)
+//   'show_reasoning' - Route thinking to normal content stream (VSCode will display it!)
 const THINKING_MODE = process.env.THINKING_MODE || 'vscode';
 const THINKING_DEBUG = process.env.THINKING_DEBUG === 'true';
 
@@ -295,10 +295,10 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
     console.log('   - \'vscode\': Standard reasoning_content for VSCode Copilot (default)');
     console.log('   - \'events\': Custom \'event: thinking\' SSE events only');
     console.log('   - \'both\': Both standard and custom events');
-    console.log('   - \'content\': Route thinking to normal content stream (VSCode will display it!)');
+    console.log('   - \'show_reasoning\': Route thinking to normal content stream (VSCode will display it!)');
     console.log('   - \'off\': Disable thinking content entirely');
     console.log('');
-    console.log('   Configure with: THINKING_MODE=content THINKING_DEBUG=true node proxy-server.js');
+    console.log('   Configure with: THINKING_MODE=show_reasoning THINKING_DEBUG=true node proxy-server.js');
   }
   
   // Estimate prompt length to warn about potential timeouts
@@ -494,25 +494,25 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
                       output += `data: ${JSON.stringify(modifiedData)}\n`;
                       break;
                       
-                    case 'vscode':
-                    default:
-                      // VSCode mode: preserve original reasoning_content format only
-                      output += line + '\n';
-                      break;
-                      
-                    case 'off':
-                      // Strip reasoning content entirely and only pass regular content
-                      if (data.choices[0].delta.content) {
-                        output += line + '\n';
+                    case 'show_reasoning':
+                      // Route thinking content to normal content stream (VSCode will display it!)
+                      const modifiedData = { ...data };
+                      if (modifiedData.choices && modifiedData.choices[0] && modifiedData.choices[0].delta) {
+                        let content = reasoningContent;
+                        // Add thinking prefix only at the very start
+                        if (!thinkingStarted) {
+                          content = `💭 ${content}`;
+                          thinkingStarted = true;
+                          if (THINKING_DEBUG) {
+                            console.log(`🎯 [REQUEST-${requestId}] Started show_reasoning mode with prefix`);
+                          }
+                        }
+                        modifiedData.choices[0].delta.content = content;
+                        // Remove reasoning_content field
+                        delete modifiedData.choices[0].delta.reasoning_content;
                       }
+                      output += `data: ${JSON.stringify(modifiedData)}\n`;
                       break;
-                  }
-                } else {
-                  // Check if we're transitioning from thinking to regular content
-                  if (thinkingStarted && data.choices && data.choices[0] && data.choices[0].delta && data.choices[0].delta.content) {
-                    // Reset thinking flag when we start getting regular content
-                    thinkingStarted = false;
-                    if (THINKING_DEBUG) {
                       console.log(`🏁 [REQUEST-${requestId}] Thinking ended, switching to regular content`);
                     }
                   }
@@ -574,25 +574,25 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
           
           // Handle different thinking modes for non-streaming
           switch (THINKING_MODE) {
-            case 'vscode':
-            default:
-              // VSCode mode: keep reasoning_content as-is for VSCode to handle
-              // No modifications needed - VSCode should display this directly
-              break;
-              
-            case 'events':
-            case 'both':
-              // Add thinking property for compatibility
-              data.choices[0].message.thinking = reasoningContent;
-              break;
-              
-            case 'off':
-              // Remove reasoning content entirely
-              delete data.choices[0].message.reasoning_content;
-              break;
-          }
-        }
-        
+                    case 'show_reasoning':
+                      // Route thinking content to normal content stream (VSCode will display it!)
+                      const modifiedData = { ...data };
+                      if (modifiedData.choices && modifiedData.choices[0] && modifiedData.choices[0].delta) {
+                        let content = reasoningContent;
+                        // Add thinking prefix only at the very start
+                        if (!thinkingStarted) {
+                          content = `💭 ${content}`;
+                          thinkingStarted = true;
+                          if (THINKING_DEBUG) {
+                            console.log(`🎯 [REQUEST-${requestId}] Started show_reasoning mode with prefix`);
+                          }
+                        }
+                        modifiedData.choices[0].delta.content = content;
+                        // Remove reasoning_content field
+                        delete modifiedData.choices[0].delta.reasoning_content;
+                      }
+                      output += `data: ${JSON.stringify(modifiedData)}\n`;
+                      break;
         const responseHeaders = { ...upRes.headers };
         if (responseHeaders['content-encoding']) {
           delete responseHeaders['content-encoding'];
@@ -748,11 +748,12 @@ app.listen(LISTEN_PORT, '127.0.0.1', () => {
   console.log(`   Mode: ${THINKING_MODE}`);
   console.log(`   Debug: ${THINKING_DEBUG ? 'enabled' : 'disabled'}`);
   console.log(`\n   Available modes:`);
-  console.log(`   - 'vscode': Standard reasoning_content for VSCode Copilot (default)`);
+  console.log(`   - 'default': Standard reasoning_content for Copilot protocol (reasoning hidden in VS Code GUI)`);
   console.log(`   - 'events': Custom 'event: thinking' SSE events only`);
   console.log(`   - 'both': Both standard and custom events`);
-  console.log(`   - 'content': Route thinking to normal content stream (VSCode will display it!)`);
+  console.log(`   - 'show_reasoning': Route thinking to normal content stream (VSCode will display it!)`);
   console.log(`   - 'off': Disable thinking content entirely`);
-  console.log(`\n   Configure with: THINKING_MODE=content THINKING_DEBUG=true node proxy-server.js`);
+  console.log(`\n   Configure with: THINKING_MODE=show_reasoning THINKING_DEBUG=true node proxy-server.js`);
+  console.log(`\n   Configure with: THINKING_MODE=show_reasoning THINKING_DEBUG=true node proxy-server.js`);
 });
 
