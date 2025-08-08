@@ -8,8 +8,9 @@ import { pipeline, Transform } from 'node:stream';
 import httpProxy from 'http-proxy';
 
 const { createProxyServer } = httpProxy;
-const LISTEN_PORT = 11434;
-const UPSTREAM = 'http://127.0.0.1:11433';
+const LISTEN_PORT = process.env.LISTEN_PORT ? parseInt(process.env.LISTEN_PORT, 10) : 11434;
+const LLAMA_SERVER_PORT = process.env.LLAMA_SERVER_PORT ? parseInt(process.env.LLAMA_SERVER_PORT, 10) : 11433;
+const UPSTREAM = process.env.UPSTREAM || `http://127.0.0.1:${LLAMA_SERVER_PORT}`;
 
 // Global state for streaming and /api/show interference prevention
 let activeStreams = 0;
@@ -273,7 +274,13 @@ jsonRoutes.forEach(([method, path]) => {
 // Streaming chat completions with tool‑schema fix and deepseek thinking mode support
 
 // Environment variables to control thinking mode behavior
-const THINKING_MODE = process.env.THINKING_MODE || 'vscode'; // 'vscode', 'events', 'both', 'off', 'content'
+// THINKING_MODE options:
+//   'vscode'  - Standard reasoning_content for VSCode Copilot (default)
+//   'events'  - Custom 'event: thinking' SSE events only
+//   'both'    - Both content and event streams
+//   'off'     - Disable thinking events
+//   'content' - Route thinking to normal content stream (VSCode will display it!)
+const THINKING_MODE = process.env.THINKING_MODE || 'vscode';
 const THINKING_DEBUG = process.env.THINKING_DEBUG === 'true';
 
 app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {

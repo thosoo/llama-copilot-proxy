@@ -13,7 +13,7 @@ FROM base AS prod
 COPY . .
 ENV NODE_ENV=production
 EXPOSE 11434
-CMD ["node", "inject-capabilities.js"]
+CMD ["node", "proxy-server.js"]
 
 # For development, use the 'dev' stage
 # docker build --target dev -t llama-copilot-proxy:dev .
