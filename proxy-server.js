@@ -4,12 +4,19 @@ const verboseLog = (...args) => { if (process.env.VERBOSE) console.log(...args);
 const verboseError = (...args) => { if (process.env.VERBOSE) console.error(...args); };
 import fetch from 'node-fetch';
 import http from 'node:http';
-import { pipeline } from 'node:stream';
+import { pipeline, Transform } from 'node:stream';
 import httpProxy from 'http-proxy';
 
 const { createProxyServer } = httpProxy;
 const LISTEN_PORT = 11434;
 const UPSTREAM = 'http://127.0.0.1:11433';
+
+// Global state for streaming and /api/show interference prevention
+let activeStreams = 0;
+let apiShowCache = null;
+let apiShowCacheTime = 0;
+let queuedShowRequests = [];
+const API_SHOW_CACHE_TTL = 300000; // 5 minutes cache TTL
 
 
 const app = express();
@@ -114,13 +121,99 @@ function patchToolsArray(tools) {
   });
 }
 
-// JSON endpoints that need capability injection
+// Helper functions for /api/show caching and interference prevention
+async function processQueuedShowRequests() {
+  if (queuedShowRequests.length === 0 || activeStreams > 0) return;
+  
+  console.log(`🔄 [API-SHOW-QUEUE] Processing ${queuedShowRequests.length} queued requests...`);
+  
+  const requests = queuedShowRequests.splice(0); // Clear the queue
+  
+  // Process one request to update cache
+  if (requests.length > 0) {
+    const { body } = requests[0]; // Use first request for cache update
+    try {
+      const upstreamRes = await fetch(`${UPSTREAM}/api/show`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await upstreamRes.json();
+      
+      // Update cache
+      apiShowCache = patch(data);
+      apiShowCacheTime = Date.now();
+      
+      console.log(`✅ [API-SHOW-QUEUE] Cache updated from queued request`);
+    } catch (error) {
+      console.error(`❌ [API-SHOW-QUEUE] Failed to update cache:`, error.message);
+    }
+  }
+}
+
+async function handleApiShowRequest(req, res) {
+  const timestamp = new Date().toISOString();
+  const body = req.body;
+  
+  console.log(`🔍 [API-SHOW] ${timestamp} Request received (activeStreams: ${activeStreams})`);
+  if (body) {
+    console.log(`🔍 [API-SHOW] Body present:`, JSON.stringify(body, null, 2));
+  }
+  
+  // If streams are active, reject the request
+  if (activeStreams > 0) {
+    console.log(`🚫 [API-SHOW] Rejecting request - streams are active (activeStreams: ${activeStreams})`);
+    
+    // Add to queue for later processing
+    queuedShowRequests.push({ body, timestamp });
+    console.log(`📋 [API-SHOW] Request queued for later processing (queue size: ${queuedShowRequests.length})`);
+    
+    // Reject with 503 Service Unavailable
+    res.status(503).json({
+      error: 'service_temporarily_unavailable',
+      message: 'API show requests are not available while streams are active',
+      active_streams: activeStreams,
+      retry_after: 'Please retry after active streams complete'
+    });
+    return;
+  }
+  
+  // Make upstream request (no active streams)
+  try {
+    console.log(`📡 [API-SHOW] Making upstream request to ${UPSTREAM}/api/show`);
+    const upstreamRes = await fetch(`${UPSTREAM}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await upstreamRes.json();
+    
+    console.log(`🔍 [API-SHOW] Response received, processing...`);
+    
+    const processedData = patch(data);
+    
+    // Update cache
+    apiShowCache = processedData;
+    apiShowCacheTime = Date.now();
+    
+    console.log(`🔍 [API-SHOW] Response sent to client (cache updated)`);
+    res.json(processedData);
+    
+  } catch (err) {
+    console.error(`🔍 [API-SHOW] Error occurred during request:`, err);
+    res.status(502).json({ error: 'proxy_error' });
+  }
+}
+
+// JSON endpoints that need capability injection (excluding /api/show which has special handling)
 const jsonRoutes = [
   ['GET', '/api/models'],
-  ['POST', '/api/show'],
   ['GET', '/v1/models'],
   ['GET', '/api/tags']
 ];
+
+// Special handler for /api/show with interference prevention
+app.post('/api/show', handleApiShowRequest);
 
 jsonRoutes.forEach(([method, path]) => {
   app[method.toLowerCase()](path, async (req, res) => {
@@ -178,8 +271,6 @@ jsonRoutes.forEach(([method, path]) => {
 });
 
 // Streaming chat completions with tool‑schema fix and deepseek thinking mode support
-
-import { Transform } from 'stream';
 
 // Environment variables to control thinking mode behavior
 const THINKING_MODE = process.env.THINKING_MODE || 'vscode'; // 'vscode', 'events', 'both', 'off', 'content'
@@ -241,6 +332,31 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
   }
   
   let heartbeatInterval; // Declare heartbeat interval in function scope
+  let streamCleaned = false; // Flag to prevent multiple cleanup calls
+  
+  // Track active stream to prevent /api/show interference
+  activeStreams++;
+  console.log(`🔒 [STREAM-TRACKING] Stream started (active: ${activeStreams})`);
+  
+  // Cleanup function that can only be called once
+  const cleanupStream = (reason) => {
+    if (streamCleaned) return; // Already cleaned up
+    streamCleaned = true;
+    
+    activeStreams--;
+    console.log(`🔓 [STREAM-TRACKING] Stream ended: ${reason} (active: ${activeStreams})`);
+    
+    // Clean up heartbeat interval
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+      heartbeatInterval = null;
+    }
+    
+    // Process any queued /api/show requests
+    if (activeStreams === 0) {
+      setTimeout(() => processQueuedShowRequests(), 100);
+    }
+  };
   
   const upstreamReq = http.request(`${UPSTREAM}${req.originalUrl}`, {
     method: 'POST',
@@ -258,33 +374,38 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
     console.log(`✅ [INFO] Upstream responded (~${estimatedTokens} tokens prompt processed)`);
     
     if (isStreaming) {
-      res.writeHead(upRes.statusCode || 200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'X-Accel-Buffering': 'no'
-      });
-      res.flushHeaders();
-      
-      // Send multiple heartbeats to prevent timeout during long prompt processing
-      res.write(': heartbeat\n\n');
-      res.write(': processing-prompt\n\n');
-      
-      // Send periodic heartbeats for any substantial prompt (even shorter ones can cause delays)
-      let heartbeatInterval;
-      if (estimatedTokens > 1000) {
-        console.log(`📡 [INFO] Setting up extended heartbeat for prompt (~${estimatedTokens} tokens)`);
-        heartbeatInterval = setInterval(() => {
-          if (!res.destroyed && !res.writableEnded) {
-            res.write(': heartbeat-extended\n\n');
-          } else {
-            clearInterval(heartbeatInterval);
-          }
-        }, 1500); // Heartbeat every 1.5 seconds for any substantial prompt
+      // Only set headers if not already sent (for large prompts, headers are sent early)
+      if (!res.headersSent) {
+        res.writeHead(upRes.statusCode || 200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'X-Accel-Buffering': 'no'
+        });
+        res.flushHeaders();
+        
+        // Send initial heartbeats and set up heartbeat interval to keep the connection alive
+        res.write(': heartbeat\n\n');
+        res.write(': processing-prompt\n\n');
+        if (!heartbeatInterval) {
+          console.log(`📡 [INFO] Starting heartbeat interval for streaming response`);
+          heartbeatInterval = setInterval(() => {
+            if (!res.destroyed && !res.writableEnded) {
+              res.write(': heartbeat\n\n');
+            } else {
+              clearInterval(heartbeatInterval);
+            }
+          }, 10000); // Heartbeat every 10 seconds
+        }
+      } else {
+        // Headers already sent, just log
+        console.log(`📡 [INFO] Using pre-sent headers for large prompt response`);
       }
+      
+      // Initial heartbeats are already being sent from pre-response setup
       // Transform stream to parse and emit reasoning_content based on THINKING_MODE
       // This enables different thinking mode formats for different clients
       let buffer = '';
@@ -415,10 +536,7 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
         }
       });
       pipeline(upRes, thinkTransform, res, (err) => {
-        // Clean up heartbeat interval
-        if (heartbeatInterval) {
-          clearInterval(heartbeatInterval);
-        }
+        cleanupStream('pipeline completion');
         
         if (err) {
           const isClientDisconnect = ['ECONNRESET', 'EPIPE', 'ECONNABORTED', 'ENOTFOUND', 'ETIMEDOUT'].includes(err.code);
@@ -474,25 +592,27 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
         }
         res.writeHead(upRes.statusCode || 500, responseHeaders);
         res.end(JSON.stringify(data));
+        
+        cleanupStream('non-streaming response');
       });
     }
   });
   upstreamReq.on('error', (err) => {
     console.error(`[POST] Upstream request error for ${req.originalUrl}:`, err);
+    
+    cleanupStream('upstream error');
+    
     if (!res.headersSent) {
       res.status(502).json({ error: 'upstream_connection_error', message: err.message });
     }
   });
-  req.on('close', () => {
-    if (heartbeatInterval) {
-      clearInterval(heartbeatInterval);
-    }
-    if (process.env.VERBOSE) console.log(`[POST] Client closed connection for ${req.originalUrl}`);
-  });
+  // Note: Removed aggressive req.on('close') handler that was cleaning up streams too early
+  // Stream cleanup should only happen when the actual response pipeline completes
+  // The original handler was causing interference issues by decrementing activeStreams 
+  // before the upstream response was actually finished processing
   req.on('error', (err) => {
-    if (heartbeatInterval) {
-      clearInterval(heartbeatInterval);
-    }
+    cleanupStream('request error');
+    
     const isClientDisconnect = ['ECONNRESET', 'EPIPE', 'ECONNABORTED'].includes(err.code);
     if (isClientDisconnect) {
       if (process.env.VERBOSE) console.log(`[POST] Client connection error for ${req.originalUrl}: ${err.code}`);
@@ -502,6 +622,37 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
   });
   upstreamReq.write(payload);
   upstreamReq.end();
+  
+  // Start immediate heartbeats for large prompts to prevent client timeout
+  // This is crucial for large prompts where upstream processing can take a long time
+  if (estimatedTokens > 1000) {
+    console.log(`📡 [INFO] Starting immediate heartbeats for large prompt (~${estimatedTokens} tokens)`);
+    
+    // Send initial response headers and heartbeats immediately
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'X-Accel-Buffering': 'no'
+    });
+    res.flushHeaders();
+    
+    // Send initial heartbeats
+    res.write(': heartbeat-initial\n\n');
+    res.write(': processing-large-prompt\n\n');
+    
+    // Start periodic heartbeats
+    heartbeatInterval = setInterval(() => {
+      if (!res.destroyed && !res.writableEnded) {
+        res.write(': heartbeat-waiting\n\n');
+      } else {
+        clearInterval(heartbeatInterval);
+      }
+    }, 1000); // More frequent heartbeats during waiting
+  }
   
   // Log that we've sent the request to upstream
   console.log(`📤 [INFO] Sent request to upstream (~${estimatedTokens} tokens). Waiting for processing...`);

@@ -6,12 +6,14 @@
   "main": "proxy-server.js",
   "scripts": {
     "start": "node proxy-server.js",
-    "test": "node test/inject-capabilities.test.js"
+    "test": "node tests/inject-capabilities.test.js"
   },
   "dependencies": {
     "express": "^4.21.2",
     "http-proxy": "^1.18.1",
-    "node-fetch": "^3.3.2"
+    "http-proxy-middleware": "^3.0.5",
+    "node-fetch": "^3.3.2",
+    "ws": "^8.18.3"
   },
   "keywords": [
     "copilot",
@@ -20,5 +22,11 @@
     "ai"
   ],
   "author": "",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@eslint/js": "^9.32.0",
+    "eslint": "^9.32.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.6.2"
+  }
 }
