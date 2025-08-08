@@ -4,11 +4,18 @@ You can use Docker Compose to run both the proxy and a llama-server together. Th
 
 ### Quick Start
 1. Place your GGUF model file in a `models/` directory at the project root.
-2. Build and start both services:
+2. (Optional) For multimodal support (image/text), use a model and template compatible with [llama.cpp multimodal](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md). Edit your `docker-compose.yml` to add the `--mm` flag:
+   ```yaml
+   command: ["llama-server", "--model", "/models/your-model.gguf", "--port", "11433", "--jinja", "--mm"]
+   volumes:
+     - ./models:/models
+   ```
+3. (Optional) For agent mode and tool use, specify a compatible chat template (e.g., `--chat-template chatml`). See [supported templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template).
+4. Build and start both services:
    ```bash
    docker compose up --build
    ```
-3. The proxy will be available at `http://localhost:11434` and will forward requests to the llama-server at `http://llama-server:11433`.
+5. The proxy will be available at `http://localhost:11434` and will forward requests to the llama-server at `http://llama-server:11433`.
 
 ### Customizing Model Path
 - Edit `docker-compose.yml` to change the model path or llama-server options as needed.
@@ -132,8 +139,11 @@ VS Code Copilot's BYOK feature expects Ollama-style API endpoints (`/api/chat`),
 - **Path Rewriting**: `/api/chat` → `/v1/chat/completions`
 - **Tool Schema Patching**: Auto-adds missing `parameters` objects to tool definitions
 - **Streaming Support**: Maintains proper server-sent events for real-time responses
-- **Error Handling**: Graceful handling of connection resets and client disconnects
+- **Error Handling**: Graceful handling of connection resets, client disconnects, and new error codes (see [llama-server changelog](https://github.com/ggml-org/llama.cpp/issues/9291))
 - **JSON Minification**: Optimizes payload sizes for better performance
+- **Multimodal Support**: Passes through image/text payloads when enabled (see [llama.cpp multimodal docs](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md))
+- **GGUF Format**: Ensure your model is in GGUF format ([GGUF guide](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md))
+- **Chat Templates**: For agent mode and tool use, specify a compatible chat template (e.g., `--chat-template chatml`). See [supported templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template).
 
 ## Architecture
 
@@ -149,6 +159,7 @@ The proxy now gracefully handles:
 - Connection timeouts (`ETIMEDOUT`)
 - Broken pipes (`EPIPE`)
 - Connection aborts (`ECONNABORTED`)
+- New error codes from recent llama.cpp releases (see [API changelog](https://github.com/ggml-org/llama.cpp/issues/9291))
 
 These are logged as informational messages rather than errors, since they're normal in streaming scenarios.
 
@@ -421,7 +432,7 @@ VERBOSE=1 LISTEN_PORT=11434 UPSTREAM=http://127.0.0.1:11433 node proxy-server.js
 ## FAQ
 
 **Q: Can I use this proxy with any LLM model?**
-A: The proxy works with llama.cpp-compatible models that support OpenAI function calling format and chat templates. For best results, use models with tool support and start llama-server with `--jinja`.
+A: The proxy works with llama.cpp-compatible models that support OpenAI function calling format, GGUF format, and chat templates. For best results, use models with tool and multimodal support and start llama-server with `--jinja` and `--mm` if needed.
 
 **Q: Does this proxy support streaming responses?**
 A: Yes, it maintains server-sent events for real-time streaming, compatible with VS Code Copilot.
@@ -445,6 +456,9 @@ A: The proxy is designed for local development and experimentation. For producti
 - [GitHub Copilot Documentation](https://docs.github.com/en/copilot)
 - [llama.cpp Function Calling](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md)
 - [llama.cpp Supported Chat Templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template)
+- [llama.cpp Multimodal Documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md)
+- [GGUF Format Guide](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md)
+- [llama-server API Changelog](https://github.com/ggml-org/llama.cpp/issues/9291)
 - [llama.cpp Main Repository](https://github.com/ggml-org/llama.cpp)
 - [Node.js http-proxy](https://github.com/http-party/node-http-proxy)
 - [Express.js Middleware Guide](https://expressjs.com/en/guide/using-middleware.html)
