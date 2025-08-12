@@ -9,7 +9,7 @@ import httpProxy from 'http-proxy';
 
 const { createProxyServer } = httpProxy;
 const LISTEN_PORT = process.env.LISTEN_PORT ? parseInt(process.env.LISTEN_PORT, 10) : 11434;
-const LLAMA_SERVER_PORT = process.env.LLAMA_SERVER_PORT ? parseInt(process.env.LLAMA_SERVER_PORT, 10) : 11433;
+const LLAMA_SERVER_PORT = process.env.LLAMA_SERVER_PORT ? parseInt(process.env.LLAMA_SERVER_PORT, 10) : 8080;
 const UPSTREAM = process.env.UPSTREAM || `http://127.0.0.1:${LLAMA_SERVER_PORT}`;
 
 // Global state for streaming and /api/show interference prevention
@@ -472,9 +472,9 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
                       output += line + '\n'; // Pass through original
                       break;
                       
-                    case 'content':
+                    case 'content': {
                       // Route thinking content to normal content stream (VSCode will display it!)
-                      const modifiedData = { ...data };
+                      let modifiedData = { ...data };
                       if (modifiedData.choices && modifiedData.choices[0] && modifiedData.choices[0].delta) {
                         let content = reasoningContent;
                         
@@ -493,10 +493,11 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
                       }
                       output += `data: ${JSON.stringify(modifiedData)}\n`;
                       break;
+                    }
                       
-                    case 'show_reasoning':
+                    case 'show_reasoning': {
                       // Route thinking content to normal content stream (VSCode will display it!)
-                      const modifiedData = { ...data };
+                      let modifiedData = { ...data };
                       if (modifiedData.choices && modifiedData.choices[0] && modifiedData.choices[0].delta) {
                         let content = reasoningContent;
                         // Add thinking prefix only at the very start
@@ -513,12 +514,8 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
                       }
                       output += `data: ${JSON.stringify(modifiedData)}\n`;
                       break;
-                      console.log(`🏁 [REQUEST-${requestId}] Thinking ended, switching to regular content`);
                     }
                   }
-                  
-                  // Pass through all non-reasoning lines
-                  output += line + '\n';
                 }
               } catch (e) {
                 // Not valid JSON, pass through unchanged
@@ -529,7 +526,6 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
               output += line + '\n';
             }
           }
-          
           callback(null, output);
         },
         flush(callback) {
@@ -574,9 +570,9 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
           
           // Handle different thinking modes for non-streaming
           switch (THINKING_MODE) {
-                    case 'show_reasoning':
+                    case 'show_reasoning': {
                       // Route thinking content to normal content stream (VSCode will display it!)
-                      const modifiedData = { ...data };
+                      let modifiedData = { ...data };
                       if (modifiedData.choices && modifiedData.choices[0] && modifiedData.choices[0].delta) {
                         let content = reasoningContent;
                         // Add thinking prefix only at the very start
@@ -593,6 +589,9 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
                       }
                       output += `data: ${JSON.stringify(modifiedData)}\n`;
                       break;
+                    }
+          }
+        }
         const responseHeaders = { ...upRes.headers };
         if (responseHeaders['content-encoding']) {
           delete responseHeaders['content-encoding'];

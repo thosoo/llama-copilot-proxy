@@ -6,7 +6,7 @@ You can use Docker Compose to run both the proxy and a llama-server together. Th
 1. Place your GGUF model file in a `models/` directory at the project root.
 2. (Optional) For multimodal support (image/text), use a model and template compatible with [llama.cpp multimodal](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md). Edit your `docker-compose.yml` to add the `--mm` flag:
    ```yaml
-   command: ["llama-server", "--model", "/models/your-model.gguf", "--port", "11433", "--jinja", "--mm"]
+   command: ["llama-server", "--model", "/models/your-model.gguf", "--port", "8080", "--jinja", "--mm"]
    volumes:
      - ./models:/models
    ```
@@ -15,13 +15,13 @@ You can use Docker Compose to run both the proxy and a llama-server together. Th
    ```bash
    docker compose up --build
    ```
-5. The proxy will be available at `http://localhost:11434` and will forward requests to the llama-server at `http://llama-server:11433`.
+5. The proxy will be available at `http://localhost:11434` and will forward requests to the llama-server at `http://llama-server:8080`.
 
 ### Customizing Model Path
 - Edit `docker-compose.yml` to change the model path or llama-server options as needed.
 - Example:
   ```yaml
-  command: ["llama-server", "--model", "/models/your-model.gguf", "--port", "11433", "--jinja"]
+  command: ["llama-server", "--model", "/models/your-model.gguf", "--port", "8080", "--jinja"]
   volumes:
     - ./models:/models
   ```
@@ -114,7 +114,7 @@ A seamless Node.js proxy for bridging VS Code Copilot's BYOK (Bring Your Own Key
 1. **Start llama-server with tool support:**
    ```bash
    # Install and start llama-server with jinja templates for tool-calling
-   llama-server --model /path/to/your/model.gguf --port 11433 --jinja
+   llama-server --model /path/to/your/model.gguf --port 8080 --jinja
    ```
 
 2. **Start the proxy:**
@@ -148,7 +148,7 @@ VS Code Copilot's BYOK feature expects Ollama-style API endpoints (`/api/chat`),
 ## Architecture
 
 ```
-VS Code Copilot (BYOK) → Proxy (Port 11434) → llama.cpp (llama-server, Port 11433)
+VS Code Copilot (BYOK) → Proxy (Port 11434) → llama.cpp (llama-server, Port 8080)
     /api/chat                                      /v1/chat/completions
 ```
 
@@ -171,14 +171,14 @@ This proxy makes it possible to use local LLM models with VS Code Copilot in age
 
 1. **Start llama.cpp server** (with tools support):
    ```bash
-   llama-server --model your-model.gguf --port 11433 --jinja
+   llama-server --model your-model.gguf --port 8080 --jinja
    ```
 
 2. **Start the proxy**:
    ```bash
    node proxy-server.js
    ```
-   The proxy will listen on `http://127.0.0.1:11434` and forward to llama.cpp on `http://127.0.0.1:11433`.
+   The proxy will listen on `http://127.0.0.1:11434` and forward to llama.cpp on `http://127.0.0.1:8080`.
 
 3. **Configure VS Code Copilot** to use the proxy:
    
@@ -366,7 +366,7 @@ curl -X POST http://127.0.0.1:11434/api/chat \
 
 - `VERBOSE=1` — Enable verbose logging (shows proxied JSONs and debug info)
 - `LISTEN_PORT` — Change the proxy listening port (default: 11434)
-- `LLAMA_SERVER_PORT` — Change the llama-server port (default: 11433)
+- `LLAMA_SERVER_PORT` — Change the llama-server port (default: 8080)
 - `UPSTREAM` — Change the upstream llama-server URL (default: http://127.0.0.1:${LLAMA_SERVER_PORT})
 - `THINKING_MODE` — Control how "thinking" events are routed. Options:
     - `default` (default): Standard reasoning_content for Copilot protocol (**reasoning hidden in VS Code GUI**)
@@ -378,7 +378,7 @@ curl -X POST http://127.0.0.1:11434/api/chat \
 
 Set environment variables before starting the proxy:
 ```bash
-VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=11433 THINKING_MODE=show_reasoning THINKING_DEBUG=true node proxy-server.js
+VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=8080 THINKING_MODE=show_reasoning THINKING_DEBUG=true node proxy-server.js
 ```
 
 ---
@@ -457,7 +457,7 @@ A: Yes, it maintains server-sent events for real-time streaming, compatible with
 A: Define tools in your Copilot payload using OpenAI function calling schema. The proxy auto-patches missing `parameters` objects.
 
 **Q: What ports does the proxy use?**
-A: By default, the proxy listens on `11434` and forwards to llama-server on `11433`. You can change these with environment variables.
+A: By default, the proxy listens on `11434` and forwards to llama-server on `8080`. You can change these with environment variables.
 
 **Q: How do I debug issues?**
 A: Enable verbose logging (`VERBOSE=1`) and check both proxy and llama-server logs. See the Advanced Troubleshooting section for more tips.
