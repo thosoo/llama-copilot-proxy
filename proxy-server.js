@@ -25,7 +25,13 @@ const proxy = createProxyServer({ changeOrigin: true });
 app.use(express.json({ limit: '100mb' }));
 
 // Health check endpoint
+
 app.get('/health', (req, res) => {
+  res.json({ status: 'ok', version: '1.0.0' });
+});
+
+// Add /api/version endpoint for Copilot BYOK provider detection
+app.get('/api/version', (req, res) => {
   res.json({ status: 'ok', version: '1.0.0' });
 });
 
@@ -729,7 +735,7 @@ app.use((req, res) => {
 });
 
 const VERSION = '1.0.0';
-app.listen(LISTEN_PORT, '127.0.0.1', () => {
+app.listen(LISTEN_PORT, '0.0.0.0', () => {
   const startupTime = new Date().toISOString();
   console.log(`\n===========================================`);
   console.log(`🚀 Copilot BYOK → llama.cpp Integration Proxy 🚀`);
@@ -737,7 +743,7 @@ app.listen(LISTEN_PORT, '127.0.0.1', () => {
   console.log(`A seamless bridge for VS Code Copilot and local llama.cpp (llama-server) with tool support.`);
   console.log(`🕐 Started at: ${startupTime} (PID: ${process.pid})`);
   console.log(`===========================================\n`);
-  console.log(`Proxy listening on http://127.0.0.1:${LISTEN_PORT}`);
+  console.log(`Proxy listening on http://0.0.0.0:${LISTEN_PORT} (all interfaces)`);
   console.log(`Upstream target: ${UPSTREAM}`);
   console.log(`Configure VS Code to use: http://127.0.0.1:${LISTEN_PORT}`);
   console.log(`Instead of: http://127.0.0.1:11433\n`);
