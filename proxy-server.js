@@ -423,7 +423,8 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
       // Transform stream to parse and emit reasoning_content based on THINKING_MODE
       // This enables different thinking mode formats for different clients
   let buffer = '';
-      let thinkingStarted = false; // Track if we've started thinking
+  let thinkingStarted = false; // Track if we've started thinking (received reasoning routed to content)
+  let insertedSeparator = false; // Insert a single blank line before first regular content after thinking
       let requestId = Date.now() + Math.random(); // Unique ID for this request
       let sentContentDelta = false; // Track if any valid choices event with non-empty delta.content was sent
   let seenDone = false; // Track if upstream has already sent [DONE]
@@ -518,7 +519,23 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
                 }
                 // Default: forward original SSE data line if not already handled
                 if (!handled) {
-                  output += trimmedLine + '\n';
+                  // In show_reasoning/content modes, if we've started thinking and now see the first
+                  // regular content delta, prefix it with a blank line to separate from thinking.
+                  if ((THINKING_MODE === 'content' || THINKING_MODE === 'show_reasoning') && thinkingStarted && !insertedSeparator) {
+                    const maybeDelta = data && data.choices && data.choices[0] && data.choices[0].delta;
+                    if (maybeDelta && typeof maybeDelta.content === 'string') {
+                      const needsSep = !maybeDelta.content.startsWith('\n');
+                      if (needsSep) {
+                        data.choices[0].delta.content = `\n\n${maybeDelta.content}`;
+                      }
+                      insertedSeparator = true;
+                      output += `data: ${JSON.stringify(data)}\n`;
+                      handled = true;
+                    }
+                  }
+                  if (!handled) {
+                    output += trimmedLine + '\n';
+                  }
                 }
               } catch (e) {
                 // Not valid JSON, pass through unchanged
