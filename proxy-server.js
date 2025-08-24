@@ -9,8 +9,20 @@ import httpProxy from 'http-proxy';
 
 const { createProxyServer } = httpProxy;
 const LISTEN_PORT = process.env.LISTEN_PORT ? parseInt(process.env.LISTEN_PORT, 10) : 11434;
-const LLAMA_SERVER_PORT = process.env.LLAMA_SERVER_PORT ? parseInt(process.env.LLAMA_SERVER_PORT, 10) : 8080;
-const UPSTREAM = process.env.UPSTREAM || `http://127.0.0.1:${LLAMA_SERVER_PORT}`;
+// Support upstream config via env, CLI arg, or fallback to localhost
+let LLAMA_SERVER_PORT = process.env.LLAMA_SERVER_PORT ? parseInt(process.env.LLAMA_SERVER_PORT, 10) : 8080;
+let UPSTREAM = process.env.UPSTREAM;
+// Allow CLI arg: --upstream=http://host:port
+process.argv.forEach(arg => {
+  if (arg.startsWith('--upstream=')) {
+    UPSTREAM = arg.split('=')[1];
+  } else if (arg.startsWith('--llama-port=')) {
+    LLAMA_SERVER_PORT = parseInt(arg.split('=')[1], 10);
+  }
+});
+if (!UPSTREAM) {
+  UPSTREAM = `http://127.0.0.1:${LLAMA_SERVER_PORT}`;
+}
 
 // Global state for streaming and /api/show interference prevention
 let activeStreams = 0;
@@ -455,72 +467,70 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
                   }
                 }
                 
-                if (data.choices && data.choices[0] && data.choices[0].delta && data.choices[0].delta.reasoning_content) {
-                  const reasoningContent = data.choices[0].delta.reasoning_content;
-                  
-                  // Always show thinking content prominently (since VSCode doesn't display it)
-                  console.log('💭', reasoningContent);
-                  
-                  if (THINKING_DEBUG) {
-                    console.log(`🧠 [REQUEST-${requestId}] Received reasoning content: ${reasoningContent.slice(0, 50)}...`);
+                // In show_reasoning mode, emit both reasoning_content (as content) and original content chunks
+                if (THINKING_MODE === 'show_reasoning') {
+                  if (data.choices && data.choices[0] && data.choices[0].delta) {
+                    const delta = data.choices[0].delta;
+                    if (delta.reasoning_content) {
+                      // Emit reasoning_content as a separate chunk with prefix
+                      let reasoningData = JSON.parse(JSON.stringify(data));
+                      let content = delta.reasoning_content;
+                      if (!thinkingStarted) {
+                        content = `💭 ${content}`;
+                        thinkingStarted = true;
+                        if (THINKING_DEBUG) {
+                          console.log(`🎯 [REQUEST-${requestId}] Started show_reasoning mode with prefix`);
+                        }
+                      }
+                      reasoningData.choices[0].delta = { content };
+                      output += `data: ${JSON.stringify(reasoningData)}\n`;
+                    }
+                    if (delta.content) {
+                      // Emit the original content chunk as-is
+                      output += line + '\n';
+                    }
+                  } else {
+                    // If no delta, just pass through
+                    output += line + '\n';
                   }
-                  
-                  // Handle different thinking modes
-                  switch (THINKING_MODE) {
-                    case 'events':
-                      // Only emit custom thinking events
-                      output += `event: thinking\ndata: ${JSON.stringify(reasoningContent)}\n\n`;
-                      break;
-                      
-                    case 'both':
-                      // Emit both custom events and preserve original
-                      output += `event: thinking\ndata: ${JSON.stringify(reasoningContent)}\n\n`;
-                      output += line + '\n'; // Pass through original
-                      break;
-                      
-                    case 'content': {
-                      // Route thinking content to normal content stream (VSCode will display it!)
-                      let modifiedData = { ...data };
-                      if (modifiedData.choices && modifiedData.choices[0] && modifiedData.choices[0].delta) {
-                        let content = reasoningContent;
-                        
-                        // Add thinking prefix only at the very start
-                        if (!thinkingStarted) {
-                          content = `💭 ${content}`;
-                          thinkingStarted = true;
-                          if (THINKING_DEBUG) {
-                            console.log(`🎯 [REQUEST-${requestId}] Started thinking mode with prefix`);
-                          }
-                        }
-                        
-                        modifiedData.choices[0].delta.content = content;
-                        // Remove reasoning_content field
-                        delete modifiedData.choices[0].delta.reasoning_content;
-                      }
-                      output += `data: ${JSON.stringify(modifiedData)}\n`;
-                      break;
+                } else {
+                  // All other modes: original logic
+                  if (data.choices && data.choices[0] && data.choices[0].delta && data.choices[0].delta.reasoning_content) {
+                    const reasoningContent = data.choices[0].delta.reasoning_content;
+                    // Always show thinking content prominently (since VSCode doesn't display it)
+                    console.log('💭', reasoningContent);
+                    if (THINKING_DEBUG) {
+                      console.log(`🧠 [REQUEST-${requestId}] Received reasoning content: ${reasoningContent.slice(0, 50)}...`);
                     }
-                      
-                    case 'show_reasoning': {
-                      // Route thinking content to normal content stream (VSCode will display it!)
-                      let modifiedData = { ...data };
-                      if (modifiedData.choices && modifiedData.choices[0] && modifiedData.choices[0].delta) {
-                        let content = reasoningContent;
-                        // Add thinking prefix only at the very start
-                        if (!thinkingStarted) {
-                          content = `💭 ${content}`;
-                          thinkingStarted = true;
-                          if (THINKING_DEBUG) {
-                            console.log(`🎯 [REQUEST-${requestId}] Started show_reasoning mode with prefix`);
+                    switch (THINKING_MODE) {
+                      case 'events':
+                        output += `event: thinking\ndata: ${JSON.stringify(reasoningContent)}\n\n`;
+                        break;
+                      case 'both':
+                        output += `event: thinking\ndata: ${JSON.stringify(reasoningContent)}\n\n`;
+                        output += line + '\n';
+                        break;
+                      case 'content': {
+                        let modifiedData = { ...data };
+                        if (modifiedData.choices && modifiedData.choices[0] && modifiedData.choices[0].delta) {
+                          let content = reasoningContent;
+                          if (!thinkingStarted) {
+                            content = `💭 ${content}`;
+                            thinkingStarted = true;
+                            if (THINKING_DEBUG) {
+                              console.log(`🎯 [REQUEST-${requestId}] Started thinking mode with prefix`);
+                            }
                           }
+                          modifiedData.choices[0].delta.content = content;
+                          delete modifiedData.choices[0].delta.reasoning_content;
                         }
-                        modifiedData.choices[0].delta.content = content;
-                        // Remove reasoning_content field
-                        delete modifiedData.choices[0].delta.reasoning_content;
+                        output += `data: ${JSON.stringify(modifiedData)}\n`;
+                        break;
                       }
-                      output += `data: ${JSON.stringify(modifiedData)}\n`;
-                      break;
                     }
+                  } else {
+                    // Pass through all other lines
+                    output += line + '\n';
                   }
                 }
               } catch (e) {
@@ -745,6 +755,7 @@ app.listen(LISTEN_PORT, '0.0.0.0', () => {
   console.log(`===========================================\n`);
   console.log(`Proxy listening on http://0.0.0.0:${LISTEN_PORT} (all interfaces)`);
   console.log(`Upstream target: ${UPSTREAM}`);
+  console.log(`(Set with env UPSTREAM, or CLI --upstream=http://host:port)`);
   console.log(`Configure VS Code to use: http://127.0.0.1:${LISTEN_PORT}`);
   console.log(`Instead of: http://127.0.0.1:11433\n`);
   
