@@ -6,7 +6,7 @@
   "main": "proxy-server.js",
   "scripts": {
     "start": "node proxy-server.js",
-    "test": "node tests/inject-capabilities.test.js"
+  "test": "node tests/run-all-tests.js"
   },
   "dependencies": {
     "express": "^4.21.2",
