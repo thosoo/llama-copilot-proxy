@@ -1,46 +1,102 @@
-## Docker Compose Support
 
-You can use Docker Compose to run both the proxy and a llama-server together. This is ideal for local development and testing.
+# Copilot BYOK → llama.cpp Integration Proxy
 
-### Quick Start
-1. Place your GGUF model file in a `models/` directory at the project root.
-2. (Optional) For multimodal support (image/text), use a model and template compatible with [llama.cpp multimodal](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md). Edit your `docker-compose.yml` to add the `--mm` flag:
-   ```yaml
-   command: ["llama-server", "--model", "/models/your-model.gguf", "--port", "8080", "--jinja", "--mm"]
-   volumes:
-     - ./models:/models
-   ```
-3. (Optional) For agent mode and tool use, specify a compatible chat template (e.g., `--chat-template chatml`). See [supported templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template).
-4. Build and start both services:
-   ```bash
-   docker compose up --build
-   ```
-5. The proxy will be available at `http://localhost:11434` and will forward requests to the llama-server at `http://llama-server:8080`.
+A seamless Node.js proxy for bridging VS Code Copilot's BYOK (Bring Your Own Key) feature with local llama.cpp (llama-server) instances. Handles API endpoint translation, tool-calling compatibility, streaming, and error handling for agent mode workflows.
 
-### Customizing Model Path
-- Edit `docker-compose.yml` to change the model path or llama-server options as needed.
-- Example:
-  ```yaml
-  command: ["llama-server", "--model", "/models/your-model.gguf", "--port", "8080", "--jinja"]
-  volumes:
-    - ./models:/models
-  ```
+## Abstract / Overview
 
-### Stopping Services
-```bash
-docker compose down
+This project enables VS Code Copilot Agent Mode to work with local llama.cpp models via a Node.js proxy. It rewrites API paths, minifies JSON, and ensures tool-calling compatibility, unlocking advanced automation and planning capabilities for your development workflow.
+
+## Key Features
+
+- **Path Rewriting**: `/api/chat` → `/v1/chat/completions`
+- **Tool Schema Patching**: Auto-adds missing `parameters` objects to tool definitions
+- **Streaming Support**: Maintains proper server-sent events for real-time responses
+- **Error Handling**: Graceful handling of connection resets, client disconnects, and new error codes (see [llama-server changelog](https://github.com/ggml-org/llama.cpp/issues/9291))
+- **JSON Minification**: Optimizes payload sizes for better performance
+- **Multimodal Support**: Passes through image/text payloads when enabled (see [llama.cpp multimodal docs](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md))
+- **GGUF Format**: Ensure your model is in GGUF format ([GGUF guide](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md))
+- **Chat Templates**: For agent mode and tool use, specify a compatible chat template (e.g., `--chat-template chatml`). See [supported templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template).
+
+
+## Copilot vs llama.cpp API/Schema Differences
+
+VS Code Copilot Agent Mode expects Ollama-style endpoints and OpenAI function calling schemas:
+
+- **Copilot expects:**
+  - Endpoint: `/api/chat` (Ollama-style)
+  - Payload: OpenAI function calling schema, e.g.:
+    ```json
+    {
+      "model": "<model-id>",
+      "messages": [
+        { "role": "system", "content": "..." },
+        { "role": "user", "content": "..." }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "create_file",
+            "description": "Create a file in the workspace.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "filePath": { "type": "string" },
+                "content": { "type": "string" }
+              },
+              "required": ["filePath", "content"]
+            }
+          }
+        }
+        // ...more tools...
+      ]
+    }
+    ```
+
+- **llama.cpp (llama-server) provides:**
+  - Endpoint: `/v1/chat/completions` (OpenAI-compatible)
+  - Requires minified JSON (no line breaks or extra whitespace)
+  - Expects tools in OpenAI function calling format (each tool must have `type: "function"` and a nested `function` object with `name`, `description`, and `parameters`)
+
+- **Proxy transformation:**
+  - Rewrites `/api/chat` → `/v1/chat/completions`
+  - Minifies JSON payloads
+  - Auto-patches missing `parameters` objects in tool definitions
+  - Passes through OpenAI-format payloads unchanged to llama.cpp
+
+**References:**
+- [llama.cpp Function Calling Documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md)
+- [Supported Chat Templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template)
+- [llama-server API Changelog](https://github.com/ggml-org/llama.cpp/issues/9291)
+
+## Architecture
+
+```
+VS Code Copilot (BYOK) → Proxy (Port 11434) → llama.cpp (llama-server, Port 8080)
+    /api/chat                                      /v1/chat/completions
 ```
 
-### Healthchecks
-- Both services include healthchecks for robust startup and dependency management.
+## Quick Start
 
----
----
-## Version
+1. **Start llama-server with tool support:**
+   ```bash
+   llama-server --model /path/to/your/model.gguf --port 8080 --jinja
+   ```
 
-Current version: **1.0.0**
+2. **Start the proxy:**
+   ```bash
+   node proxy-server.js
+   ```
 
----
+3. **Configure VS Code Copilot:**
+   Add to your VS Code settings.json:
+   ```json
+   {
+     "github.copilot.advanced.debug.overrideEngine": "http://127.0.0.1:11434"
+   }
+   ```
+
 ## Installation
 
 1. **Clone the repository:**
@@ -53,7 +109,6 @@ Current version: **1.0.0**
    ```bash
    npm install
    ```
-
 
 ## Docker Support
 
@@ -94,13 +149,47 @@ docker run --rm llama-copilot-proxy:dev npm test
 docker stop llama-copilot-proxy && docker rm llama-copilot-proxy
 ```
 
-### Docker Usage & Networking
+### Docker Compose Support
 
-#### Environment Variables
+You can use Docker Compose to run both the proxy and a llama-server together. This is ideal for local development and testing.
+
+#### Quick Start
+1. Place your GGUF model file in a `models/` directory at the project root.
+2. (Optional) For multimodal support (image/text), use a model and template compatible with [llama.cpp multimodal](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md). Edit your `docker-compose.yml` to add the `--mm` flag:
+   ```yaml
+   command: ["llama-server", "--model", "/models/your-model.gguf", "--port", "8080", "--jinja", "--mm"]
+   volumes:
+     - ./models:/models
+   ```
+3. (Optional) For agent mode and tool use, specify a compatible chat template (e.g., `--chat-template chatml`). See [supported templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template).
+4. Build and start both services:
+   ```bash
+   docker compose up --build
+   ```
+5. The proxy will be available at `http://localhost:11434` and will forward requests to the llama-server at `http://llama-server:8080`.
+
+#### Customizing Model Path
+- Edit `docker-compose.yml` to change the model path or llama-server options as needed.
+- Example:
+  ```yaml
+  command: ["llama-server", "--model", "/models/your-model.gguf", "--port", "8080", "--jinja"]
+  volumes:
+    - ./models:/models
+  ```
+
+#### Stopping Services
+```bash
+docker compose down
+```
+
+#### Healthchecks
+- Both services include healthchecks for robust startup and dependency management.
+
+#### Docker Usage & Networking
+
 - `UPSTREAM`: Sets the upstream server for proxying requests. Default: `http://127.0.0.1:8080`
 - `THINKING_MODE`: Controls the proxy's reasoning mode (e.g., `content`, `vscode`, etc.).
 - `THINKING_DEBUG`: Enables debug output if set to `true`.
-
 
 #### Example: Run with custom upstream and debug mode
 ```bash
@@ -129,229 +218,6 @@ Podman supports most Docker CLI flags, but host networking and `host.docker.inte
 
 The `.dockerignore` file ensures your image is small and efficient.
 - For multi-service setups, consider using Docker Compose.
-
----
-   The repository includes a `.gitignore` file that excludes `node_modules` from version control.
-
----
-
-# Copilot BYOK → llama.cpp Integration Proxy
-
-A seamless Node.js proxy for bridging VS Code Copilot's BYOK (Bring Your Own Key) feature with local llama.cpp (llama-server) instances. Handles API endpoint translation, tool-calling compatibility, streaming, and error handling for agent mode workflows.
-
-## Quick Start
-
-1. **Start llama-server with tool support:**
-   ```bash
-   # Install and start llama-server with jinja templates for tool-calling
-   llama-server --model /path/to/your/model.gguf --port 8080 --jinja
-   ```
-
-2. **Start the proxy:**
-   ```bash
-   node proxy-server.js
-   ```
-
-3. **Configure VS Code Copilot:**
-   Add to your VS Code settings.json:
-   ```json
-   {
-     "github.copilot.advanced.debug.overrideEngine": "http://127.0.0.1:11434"
-   }
-   ```
-
-## Problem Solved
-
-VS Code Copilot's BYOK feature expects Ollama-style API endpoints (`/api/chat`), but llama.cpp (llama-server) uses OpenAI-compatible endpoints (`/v1/chat/completions`). Additionally, tool-calling schemas need specific formatting.
-
-### Key Features
-
-- **Path Rewriting**: `/api/chat` → `/v1/chat/completions`
-- **Tool Schema Patching**: Auto-adds missing `parameters` objects to tool definitions
-- **Streaming Support**: Maintains proper server-sent events for real-time responses
-- **Error Handling**: Graceful handling of connection resets, client disconnects, and new error codes (see [llama-server changelog](https://github.com/ggml-org/llama.cpp/issues/9291))
-- **JSON Minification**: Optimizes payload sizes for better performance
-- **Multimodal Support**: Passes through image/text payloads when enabled (see [llama.cpp multimodal docs](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md))
-- **GGUF Format**: Ensure your model is in GGUF format ([GGUF guide](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md))
-- **Chat Templates**: For agent mode and tool use, specify a compatible chat template (e.g., `--chat-template chatml`). See [supported templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template).
-
-## Architecture
-
-```
-VS Code Copilot (BYOK) → Proxy (Port 11434) → llama.cpp (llama-server, Port 8080)
-    /api/chat                                      /v1/chat/completions
-```
-
-## Error Handling Improvements
-
-The proxy now gracefully handles:
-- Client disconnections (`ECONNRESET`)
-- Connection timeouts (`ETIMEDOUT`)
-- Broken pipes (`EPIPE`)
-- Connection aborts (`ECONNABORTED`)
-- New error codes from recent llama.cpp releases (see [API changelog](https://github.com/ggml-org/llama.cpp/issues/9291))
-
-These are logged as informational messages rather than errors, since they're normal in streaming scenarios.
-
-### Why?
-This proxy makes it possible to use local LLM models with VS Code Copilot in agent mode, unlocking advanced automation, tool use, and planning capabilities for your development workflow.
-
-
-## Quick Start
-
-1. **Start llama.cpp server** (with tools support):
-   ```bash
-   llama-server --model your-model.gguf --port 8080 --jinja
-   ```
-
-2. **Start the proxy**:
-   ```bash
-   node proxy-server.js
-   ```
-   The proxy will listen on `http://127.0.0.1:11434` and forward to llama.cpp on `http://127.0.0.1:8080`.
-
-3. **Configure VS Code Copilot** to use the proxy:
-   
-   **Option A: VS Code Settings (Recommended)**
-   
-   Add to your VS Code `settings.json`:
-   ```json
-   {
-     "github.copilot.advanced": {
-       "debug.overrideEngine": "http://127.0.0.1:11434"
-     }
-   }
-   ```
-   
-   **Option B: Environment Variable**
-   
-   Set before starting VS Code:
-   ```bash
-   export COPILOT_OVERRIDE_URL="http://127.0.0.1:11434"
-   code
-   ```
-
-4. **Verify setup**: Check that VS Code Copilot requests appear in the proxy logs when you use tools.
-
----
-
-## Copilot BYOK → llama.cpp Path Rewriting
-
-This proxy automatically rewrites Copilot's hard-coded Ollama-style endpoints to the OpenAI-style endpoints expected by llama.cpp (llama-server):
-
-- `POST /api/chat` → `POST /v1/chat/completions`
-- `POST /api/generate` → `POST /v1/completions`
-
-This enables seamless interoperability between Copilot Agent Mode and llama.cpp (llama-server, Qwen-3, etc.) with tool-calling support (when `--jinja` is enabled).
-
-**No changes are needed in Copilot or llama.cpp.** Just run the proxy and it will handle all necessary path rewrites and payload forwarding.
-
----
-
-## Why the Proxy is Required
-
-llama.cpp requires **minified JSON** (no line breaks or extra whitespace) for tool parsing. VS Code Copilot sends **pretty-printed JSON** by default, which causes llama.cpp to fail with errors like:
-
-```
-Failed to parse tools: [json.exception.out_of_range.403] key 'parameters' not found
-```
-
-Our proxy:
-- ✅ Minifies all upstream JSON payloads  
-- ✅ Passes through OpenAI function calling schema unchanged
-- ✅ Adds tool capabilities to model listings
-- ✅ Preserves streaming responses
-
-## Schematic: What VS Code Copilot Sends Into the Proxy
-
-When VS Code Copilot (in agent mode) sends a request to the proxy, the payload typically looks like this (OpenAI function calling schema):
-
-```json
-{
-  "model": "<model-id>",
-  "messages": [
-    { "role": "system", "content": "..." },
-    { "role": "user", "content": "..." }
-  ],
-  "tools": [
-    {
-      "type": "function",
-      "function": {
-        "name": "create_file",
-        "description": "Create a file in the workspace.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "filePath": { "type": "string" },
-            "content": { "type": "string" }
-          },
-          "required": ["filePath", "content"]
-        }
-      }
-    }
-    // ...more tools...
-  ]
-}
-```
-
-### Proxy Transformation
-The proxy passes through VS Code Copilot's OpenAI function calling schema unchanged to llama.cpp:
-
-```json
-{
-  "model": "<model-id>",
-  "messages": [...],
-  "tools": [
-    {
-      "type": "function",
-      "function": {
-        "name": "create_file",
-        "description": "Create a file in the workspace.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "filePath": { "type": "string" },
-            "content": { "type": "string" }
-          },
-          "required": ["filePath", "content"]
-        }
-      }
-    }
-    // ...more tools...
-  ]
-}
-```
-
-- The original OpenAI-format payload is forwarded directly to llama.cpp's `llama-server` for processing.
-
-**Important:**
-- The llama.cpp server must be started with the `--jinja` flag and a compatible chat template for agent mode and tool use. For some models, you may need to specify `--chat-template chatml` or provide a custom template file.
-- llama.cpp expects tools in **OpenAI function calling format**: each tool must have `type: "function"` and a nested `function` object containing `name`, `description`, and `parameters`.
-- No transformation is performed on the tools - they are passed through exactly as VS Code Copilot sends them.
-
-**References:**
-- [llama.cpp Function Calling Documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md)
-- [Supported Chat Templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template)
-- [llama-server API Changelog](https://github.com/ggml-org/llama.cpp/issues/9291)
-
-## Testing
-
-A comprehensive test suite is available to verify JSON minification behavior:
-
-```bash
-node test/inject-capabilities.test.js
-```
-
-The test suite includes 5 test cases:
-- Simple object minification
-- Complex tools array minification  
-- Nested arrays and objects minification
-- Multi-line string payload minification
-- Real upstream payload from VS Code minification
-
-All tests verify that upstream JSON payloads are properly minified (no line breaks or extra whitespace) as required by llama.cpp.
-
----
 
 ## Usage Examples
 
@@ -382,10 +248,8 @@ curl -X POST http://127.0.0.1:11434/api/chat \
   }'
 ```
 
----
-
-
 ## Environment Variables
+
 ### THINKING_MODE Details
 
 `default`: Standard Copilot protocol. Reasoning content is sent in the response, but **will NOT be displayed in the VS Code GUI**. This is the safest, most compatible mode for Copilot.
@@ -410,8 +274,6 @@ Set environment variables before starting the proxy:
 ```bash
 VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=8080 THINKING_MODE=show_reasoning THINKING_DEBUG=true node proxy-server.js
 ```
-
----
 
 ## Advanced Troubleshooting
 
@@ -450,8 +312,6 @@ VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=8080 THINKING_MODE=show_reasoning 
 - Run both proxy and llama-server on the same machine for minimal latency.
 - Monitor system resources (CPU, RAM) and optimize model size as needed.
 
----
-
 ## Security Considerations
 
 - **Environment Variables:** Never commit sensitive environment variables (API keys, secrets) to version control. Use a `.env` file and add it to `.gitignore`.
@@ -460,8 +320,6 @@ VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=8080 THINKING_MODE=show_reasoning 
 - **Logging:** If verbose logging is enabled, be aware that request/response bodies may contain sensitive information. Use with caution in production.
 - **Dependencies:** Keep dependencies up to date to avoid known vulnerabilities. Run `npm audit` regularly.
 - **CORS:** The proxy sets permissive CORS headers for development. For production, restrict origins as needed.
-
----
 
 ## Performance Tips
 
@@ -472,8 +330,6 @@ VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=8080 THINKING_MODE=show_reasoning 
 - **Resource Monitoring:** Monitor system load and memory usage. Use tools like `htop` or `top` to identify bottlenecks.
 - **Node.js Tuning:** For heavy loads, consider running the proxy with Node.js process managers (e.g., PM2) and tuning Node.js memory limits (`--max-old-space-size`).
 - **Upstream Optimization:** Ensure llama-server is started with optimal flags for your model and workload (see llama.cpp docs for details).
-
----
 
 ## FAQ
 
@@ -495,8 +351,6 @@ A: Enable verbose logging (`VERBOSE=1`) and check both proxy and llama-server lo
 **Q: Is this production-ready?**
 A: The proxy is designed for local development and experimentation. For production, review security, performance, and reliability considerations.
 
----
-
 ## References & Further Reading
 
 - [GitHub Copilot Documentation](https://docs.github.com/en/copilot)
@@ -509,5 +363,3 @@ A: The proxy is designed for local development and experimentation. For producti
 - [Node.js http-proxy](https://github.com/http-party/node-http-proxy)
 - [Express.js Middleware Guide](https://expressjs.com/en/guide/using-middleware.html)
 - [VS Code Copilot Settings](https://docs.github.com/en/copilot/configuring-copilot)
-
----
