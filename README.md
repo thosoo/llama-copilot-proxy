@@ -94,10 +94,40 @@ docker run --rm llama-copilot-proxy:dev npm test
 docker stop llama-copilot-proxy && docker rm llama-copilot-proxy
 ```
 
-### Notes
-- The container exposes port 11434 by default. You can change this with the `LISTEN_PORT` environment variable.
-- For local development, use `host.docker.internal` to connect to services running on your host machine (e.g., llama-server).
-- The `.dockerignore` file ensures your image is small and efficient.
+### Docker Usage & Networking
+
+#### Environment Variables
+- `UPSTREAM`: Sets the upstream server for proxying requests. Default: `http://127.0.0.1:8080`
+- `THINKING_MODE`: Controls the proxy's reasoning mode (e.g., `content`, `vscode`, etc.).
+- `THINKING_DEBUG`: Enables debug output if set to `true`.
+
+
+#### Example: Run with custom upstream and debug mode
+```bash
+docker run -e UPSTREAM=http://10.66.0.7:8080 -e THINKING_MODE=content -e THINKING_DEBUG=true --add-host=host.docker.internal:host-gateway -p 11434:11434 llama-copilot-proxy:latest
+```
+
+#### Podman Compatibility
+You can also run the same command with Podman:
+```bash
+podman run -e UPSTREAM=http://10.66.0.7:8080 -e THINKING_MODE=content -e THINKING_DEBUG=true --add-host=host.docker.internal:host-gateway -p 11434:11434 llama-copilot-proxy:latest
+```
+If you encounter issues with `host.docker.internal`, use Podman's host networking mode:
+```bash
+podman run --network=host -e UPSTREAM=http://10.66.0.7:8080 -e THINKING_MODE=content -e THINKING_DEBUG=true llama-copilot-proxy:latest
+```
+Podman supports most Docker CLI flags, but host networking and `host.docker.internal` may require Podman v3.4+ and additional configuration on some systems.
+
+#### Networking
+- For Linux, use `--add-host=host.docker.internal:host-gateway` to allow the container to reach services running on the host.
+- In your Node.js code, use `host.docker.internal` to connect to host services.
+- Ensure your firewall allows traffic and DNS is configured correctly for outbound connectivity.
+
+#### Build for development or production
+- Development: `docker build --target dev -t llama-copilot-proxy:dev .`
+- Production: `docker build -t llama-copilot-proxy:latest .`
+
+The `.dockerignore` file ensures your image is small and efficient.
 - For multi-service setups, consider using Docker Compose.
 
 ---
