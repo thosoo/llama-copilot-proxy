@@ -1,19 +1,20 @@
-
 # syntax=docker/dockerfile:1
-FROM node:18-alpine AS base
+FROM python:3.11-slim AS base
 WORKDIR /app
-COPY package*.json ./
-RUN npm install --production
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-FROM node:18-alpine AS dev
+FROM base AS dev
 WORKDIR /app
 COPY . .
-RUN npm install --legacy-peer-deps
+RUN pip install --no-cache-dir -r requirements.txt
 
 FROM base AS prod
 WORKDIR /app
 COPY . .
-ENV NODE_ENV=production
 ENV UPSTREAM=http://127.0.0.1:8080
+ENV LISTEN_PORT=11434
 EXPOSE 11434
-CMD node proxy-server.js
+CMD ["python3", "proxy_server.py"]

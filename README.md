@@ -1,11 +1,12 @@
 
+
 # Copilot BYOK → llama.cpp Integration Proxy
 
-A seamless Node.js proxy for bridging VS Code Copilot's BYOK (Bring Your Own Key) feature with local llama.cpp (llama-server) instances. Handles API endpoint translation, tool-calling compatibility, streaming, and error handling for agent mode workflows.
+A seamless Python (Flask) proxy for bridging VS Code Copilot's BYOK (Bring Your Own Key) feature with local llama.cpp (llama-server) instances. Handles API endpoint translation, tool-calling compatibility, streaming, and error handling for agent mode workflows.
 
 ## Abstract / Overview
 
-This project enables VS Code Copilot Agent Mode to work with local llama.cpp models via a Node.js proxy. It rewrites API paths, minifies JSON, and ensures tool-calling compatibility, unlocking advanced automation and planning capabilities for your development workflow.
+This project enables VS Code Copilot Agent Mode to work with local llama.cpp models via a Python/Flask proxy. It rewrites API paths, minifies JSON, and ensures tool-calling compatibility, unlocking advanced automation and planning capabilities for your development workflow.
 
 ## Key Features
 
@@ -73,29 +74,36 @@ VS Code Copilot Agent Mode expects Ollama-style endpoints and OpenAI function ca
 ## Architecture
 
 ```
-VS Code Copilot (BYOK) → Proxy (Port 11434) → llama.cpp (llama-server, Port 8080)
-    /api/chat                                      /v1/chat/completions
+VS Code Copilot (BYOK) → Python Proxy (Port 11434) → llama.cpp (llama-server, Port 8080)
+  /api/chat                                      /v1/chat/completions
 ```
 
 ## Quick Start
 
 1. **Start llama-server with tool support:**
-   ```bash
-   llama-server --model /path/to/your/model.gguf --port 8080 --jinja
-   ```
+  ```bash
+  llama-server --model /path/to/your/model.gguf --port 8080 --jinja
+  ```
 
-2. **Start the proxy:**
-   ```bash
-   node proxy-server.js
-   ```
+2. **Set up Python environment and install dependencies:**
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+  ```
 
-3. **Configure VS Code Copilot:**
-   Add to your VS Code settings.json:
-   ```json
-   {
-     "github.copilot.advanced.debug.overrideEngine": "http://127.0.0.1:11434"
-   }
-   ```
+3. **Start the proxy:**
+  ```bash
+  LISTEN_PORT=11434 UPSTREAM=http://127.0.0.1:8080 THINKING_MODE=show_reasoning THINKING_DEBUG=false python3 proxy_server.py
+  ```
+
+4. **Configure VS Code Copilot:**
+  Add to your VS Code settings.json:
+  ```json
+  {
+    "github.copilot.advanced.debug.overrideEngine": "http://127.0.0.1:11434"
+  }
+  ```
 
 ## Installation
 
@@ -106,13 +114,11 @@ VS Code Copilot (BYOK) → Proxy (Port 11434) → llama.cpp (llama-server, Port 
    ```
 
 2. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+  See step 2 above for Python instructions.
 
 ## Docker Support
 
-You can run the proxy in a Docker container for both development and production. The provided multi-stage Dockerfile supports Node.js 18+ and exposes port 11434 by default.
+You can run the proxy in a Docker container for both development and production. The provided Dockerfile supports Python 3.8+ and exposes port 11434 by default.
 
 ### Build the Docker image (production)
 ```bash
@@ -131,17 +137,7 @@ docker run -d --name llama-copilot-proxy -p 11434:11434 -e VERBOSE=1 llama-copil
 
 #### Change upstream server or port
 ```bash
-docker run -d --name llama-copilot-proxy -p 11434:11434 -e UPSTREAM=http://host.docker.internal:11433 llama-copilot-proxy:latest
-```
-
-### Build the Docker image (development)
-```bash
-docker build --target dev -t llama-copilot-proxy:dev .
-```
-
-### Run tests inside the container
-```bash
-docker run --rm llama-copilot-proxy:dev npm test
+docker run -d --name llama-copilot-proxy -p 11434:11434 -e UPSTREAM=http://host.docker.internal:8080 llama-copilot-proxy:latest
 ```
 
 ### Stopping and removing the container
@@ -151,7 +147,7 @@ docker stop llama-copilot-proxy && docker rm llama-copilot-proxy
 
 ### Docker Compose Support
 
-You can use Docker Compose to run both the proxy and a llama-server together. This is ideal for local development and testing.
+You can use Docker Compose to run both the proxy and a llama-server together. This is ideal for local development and testing. The Docker Compose file will use the Python proxy.
 
 #### Quick Start
 1. Place your GGUF model file in a `models/` directory at the project root.
@@ -188,12 +184,12 @@ docker compose down
 #### Docker Usage & Networking
 
 - `UPSTREAM`: Sets the upstream server for proxying requests. Default: `http://127.0.0.1:8080`
-- `THINKING_MODE`: Controls the proxy's reasoning mode (e.g., `content`, `vscode`, etc.).
+- `THINKING_MODE`: Controls the proxy's reasoning mode (e.g., `default`, `show_reasoning`, `events`, `both`, `off`).
 - `THINKING_DEBUG`: Enables debug output if set to `true`.
 
 #### Example: Run with custom upstream and debug mode
 ```bash
-docker run -e UPSTREAM=http://10.66.0.7:8080 -e THINKING_MODE=content -e THINKING_DEBUG=true --add-host=host.docker.internal:host-gateway -p 11434:11434 llama-copilot-proxy:latest
+docker run -e UPSTREAM=http://10.66.0.7:8080 -e THINKING_MODE=show_reasoning -e THINKING_DEBUG=true --add-host=host.docker.internal:host-gateway -p 11434:11434 llama-copilot-proxy:latest
 ```
 
 #### Podman Compatibility
@@ -272,7 +268,7 @@ curl -X POST http://127.0.0.1:11434/api/chat \
 
 Set environment variables before starting the proxy:
 ```bash
-VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=8080 THINKING_MODE=show_reasoning THINKING_DEBUG=true node proxy-server.js
+VERBOSE=1 LISTEN_PORT=11434 UPSTREAM=http://127.0.0.1:8080 THINKING_MODE=show_reasoning THINKING_DEBUG=true python3 proxy_server.py
 ```
 
 ## Advanced Troubleshooting
@@ -295,7 +291,6 @@ VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=8080 THINKING_MODE=show_reasoning 
 **Tool-calling fails with `key 'parameters' not found`**
 - Confirm that your model and server support OpenAI function calling format.
 - Ensure all tools in the payload have a `parameters` object (the proxy auto-patches this, but malformed requests may still fail).
-- Use the test suite (`node test/inject-capabilities.test.js`) to verify JSON minification and tool schema patching.
 
 **Streaming responses are not received**
 - Check that the proxy sets `text/event-stream` headers and flushes them immediately.
@@ -318,7 +313,7 @@ VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=8080 THINKING_MODE=show_reasoning 
 - **Proxy Exposure:** Run the proxy on localhost or a secure internal network. Avoid exposing it to the public internet unless protected by authentication and HTTPS.
 - **Upstream Server:** Ensure the upstream llama-server is also protected and not exposed to unauthorized access.
 - **Logging:** If verbose logging is enabled, be aware that request/response bodies may contain sensitive information. Use with caution in production.
-- **Dependencies:** Keep dependencies up to date to avoid known vulnerabilities. Run `npm audit` regularly.
+- **Dependencies:** Keep dependencies up to date to avoid known vulnerabilities. Run `pip audit` regularly.
 - **CORS:** The proxy sets permissive CORS headers for development. For production, restrict origins as needed.
 
 ## Performance Tips
@@ -328,7 +323,7 @@ VERBOSE=1 LISTEN_PORT=11434 LLAMA_SERVER_PORT=8080 THINKING_MODE=show_reasoning 
 - **Local Networking:** Keep proxy and llama-server on the same host or LAN to minimize latency.
 - **Streaming:** Use streaming mode for chat completions to improve responsiveness in VS Code Copilot.
 - **Resource Monitoring:** Monitor system load and memory usage. Use tools like `htop` or `top` to identify bottlenecks.
-- **Node.js Tuning:** For heavy loads, consider running the proxy with Node.js process managers (e.g., PM2) and tuning Node.js memory limits (`--max-old-space-size`).
+- **Python Tuning:** For heavy loads, consider running the proxy with process managers (e.g., gunicorn, supervisor) and tuning Python memory limits.
 - **Upstream Optimization:** Ensure llama-server is started with optimal flags for your model and workload (see llama.cpp docs for details).
 
 ## FAQ
@@ -360,6 +355,17 @@ A: The proxy is designed for local development and experimentation. For producti
 - [GGUF Format Guide](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md)
 - [llama-server API Changelog](https://github.com/ggml-org/llama.cpp/issues/9291)
 - [llama.cpp Main Repository](https://github.com/ggml-org/llama.cpp)
-- [Node.js http-proxy](https://github.com/http-party/node-http-proxy)
-- [Express.js Middleware Guide](https://expressjs.com/en/guide/using-middleware.html)
+- [Flask Documentation](https://flask.palletsprojects.com/)
+## Python Endpoints
+
+### `/v1/chat/completions` and `/chat/completions`
+POST endpoint for chat completions, supports streaming and tool-calling. Accepts OpenAI-style payloads and proxies to upstream llama-server.
+
+### `/debug/json`
+POST endpoint for debugging JSON payloads (minifies and returns input).
+
+### Fallback Proxy
+All other paths are proxied to the upstream server, preserving method and payload.
+
+See `proxy_server.py` for implementation details and advanced configuration.
 - [VS Code Copilot Settings](https://docs.github.com/en/copilot/configuring-copilot)
