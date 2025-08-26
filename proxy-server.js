@@ -383,12 +383,16 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
     verboseLog(`[POST] Upstream response status: ${upRes.statusCode}`);
     verboseLog(`[POST] Upstream response headers:`, upRes.headers);
     const isStreaming = upRes.headers['content-type']?.includes('text/event-stream');
-    
-    // Log when we receive the first response from upstream
     console.log(`✅ [INFO] Upstream responded (~${estimatedTokens} tokens prompt processed)`);
-    
+
+    // Buffer tool call results and send as a single message
+    let toolCallBuffer = '';
+    let isToolCall = false;
+    let toolCallDetected = false;
+    let doneReceived = false;
+
     if (isStreaming) {
-      // Only set headers if not already sent (for large prompts, headers are sent early)
+      // Set headers for SSE
       if (!res.headersSent) {
         res.writeHead(upRes.statusCode || 200, {
           'Content-Type': 'text/event-stream',
@@ -400,211 +404,60 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
           'X-Accel-Buffering': 'no'
         });
         res.flushHeaders();
-        
-        // Send initial heartbeats and set up heartbeat interval to keep the connection alive
         res.write(': heartbeat\n\n');
         res.write(': processing-prompt\n\n');
         if (!heartbeatInterval) {
-          console.log(`📡 [INFO] Starting heartbeat interval for streaming response`);
           heartbeatInterval = setInterval(() => {
             if (!res.destroyed && !res.writableEnded) {
               res.write(': heartbeat\n\n');
             } else {
               clearInterval(heartbeatInterval);
             }
-          }, 10000); // Heartbeat every 10 seconds
+          }, 10000);
         }
-      } else {
-        // Headers already sent, just log
-        console.log(`📡 [INFO] Using pre-sent headers for large prompt response`);
       }
-      
-      // Initial heartbeats are already being sent from pre-response setup
-      // Transform stream to parse and emit reasoning_content based on THINKING_MODE
-      // This enables different thinking mode formats for different clients
-  let buffer = '';
-  let thinkingStarted = false; // Track if we've started thinking (received reasoning routed to content)
-  let insertedSeparator = false; // Insert a single blank line before first regular content after thinking
-      let requestId = Date.now() + Math.random(); // Unique ID for this request
-      let sentContentDelta = false; // Track if any valid choices event with non-empty delta.content was sent
-  let seenDone = false; // Track if upstream has already sent [DONE]
-      if (THINKING_DEBUG) {
-        console.log(`🔍 [REQUEST-${requestId}] Starting new chat completion stream`);
-      }
-      const thinkTransform = new Transform({
-        transform(chunk, encoding, callback) {
-          buffer += chunk.toString();
-          let output = '';
-          // Process complete SSE data lines
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || ''; // Keep incomplete line in buffer
-          for (const line of lines) {
-            const trimmedLine = line.trim();
-            if (trimmedLine === 'data: [DONE]') {
-              // If upstream is ending and we haven't sent any content, inject a dummy content chunk first
-              if (!sentContentDelta) {
-                const finalData = { choices: [{ delta: { content: ' ' } }] };
-                output += `data: ${JSON.stringify(finalData)}\n\n`;
-                sentContentDelta = true;
-              }
-              seenDone = true;
-              output += 'data: [DONE]\n\n';
-            } else if (trimmedLine.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(trimmedLine.slice(6));
-                // Only set sentContentDelta if delta.content is a non-empty string
-                if (
-                  data.choices &&
-                  Array.isArray(data.choices) &&
-                  data.choices.length > 0 &&
-                  data.choices[0].delta &&
-                  typeof data.choices[0].delta.content === 'string' &&
-                  data.choices[0].delta.content.length > 0
-                ) {
-                  sentContentDelta = true;
-                }
-                // ...existing debug and thinking mode logic...
-                if (THINKING_DEBUG && data.choices && data.choices[0] && data.choices[0].delta) {
-                  const delta = data.choices[0].delta;
-                  const keys = Object.keys(delta);
-                  if (keys.length > 0) {
-                    console.log(`🔍 [DEBUG] Delta keys: ${keys.join(', ')}`);
-                    if (delta.content) {
-                      console.log(`💬 [DEBUG] Content: ${delta.content.slice(0, 30)}...`);
-                    }
-                  }
-                }
-                let handled = false;
-                if (data.choices && data.choices[0] && data.choices[0].delta && data.choices[0].delta.reasoning_content) {
-                  const reasoningContent = data.choices[0].delta.reasoning_content;
-                  // Always show thinking content prominently (since VSCode doesn't display it)
-                  console.log('💭', reasoningContent);
-                  if (THINKING_DEBUG) {
-                    console.log(`🧠 [REQUEST-${requestId}] Received reasoning content: ${reasoningContent.slice(0, 50)}...`);
-                  }
-                  // Handle different thinking modes
-                  switch (THINKING_MODE) {
-                    case 'events':
-                      // Emit custom thinking events but still forward the original SSE line
-                      output += `event: thinking\ndata: ${JSON.stringify(reasoningContent)}\n\n`;
-                      // fallthrough to forward original below
-                      break;
-                    case 'both':
-                      // Emit both custom events and preserve original
-                      output += `event: thinking\ndata: ${JSON.stringify(reasoningContent)}\n\n`;
-                      // forward original after switch via default pass-through
-                      break;
-                    case 'content':
-                    case 'show_reasoning': {
-                      // Route thinking content to normal content stream (VSCode will display it!)
-                      let modifiedData = { ...data };
-                      if (modifiedData.choices && modifiedData.choices[0] && modifiedData.choices[0].delta) {
-                        let content = reasoningContent;
-                        if (!thinkingStarted) {
-                          content = `💭 ${content}`;
-                          thinkingStarted = true;
-                          if (THINKING_DEBUG) {
-                            console.log(`🎯 [REQUEST-${requestId}] Started show_reasoning/content mode with prefix`);
-                          }
-                        }
-                        modifiedData.choices[0].delta.content = content;
-                        delete modifiedData.choices[0].delta.reasoning_content;
-                      }
-                      output += `data: ${JSON.stringify(modifiedData)}\n`;
-                      handled = true;
-                      break;
-                    }
-                    // default 'vscode' or 'off' -> pass through original below
-                  }
-                }
-                // Default: forward original SSE data line if not already handled
-                if (!handled) {
-                  // In show_reasoning/content modes, if we've started thinking and now see the first
-                  // regular content delta, prefix it with a blank line to separate from thinking.
-                  if ((THINKING_MODE === 'content' || THINKING_MODE === 'show_reasoning') && thinkingStarted && !insertedSeparator) {
-                    const maybeDelta = data && data.choices && data.choices[0] && data.choices[0].delta;
-                    if (maybeDelta && typeof maybeDelta.content === 'string') {
-                      const needsSep = !maybeDelta.content.startsWith('\n');
-                      if (needsSep) {
-                        data.choices[0].delta.content = `\n\n${maybeDelta.content}`;
-                      }
-                      insertedSeparator = true;
-                      output += `data: ${JSON.stringify(data)}\n`;
-                      handled = true;
-                    }
-                  }
-                  if (!handled) {
-                    output += trimmedLine + '\n';
-                  }
-                }
-              } catch (e) {
-                // Not valid JSON, pass through unchanged
-                output += trimmedLine + '\n';
-              }
-            } else {
-              // Pass through all non-data lines (events, comments, etc.)
-              output += trimmedLine + '\n';
-            }
-          }
-          callback(null, output);
-        },
-        flush(callback) {
-          if (buffer.length > 0) {
-            this.push(buffer.trim());
-            buffer = '';
-          }
-          // If upstream didn't send [DONE], finalize here. Inject dummy content only if we haven't sent any content.
-          if (!seenDone) {
-            if (!sentContentDelta) {
-              const finalData = { choices: [{ delta: { content: ' ' } }] };
-              this.push(`data: ${JSON.stringify(finalData)}\n\n`);
-            }
-            // Send final [DONE] event to signal end of stream (no quotes, not JSON)
-            this.push('data: [DONE]\n\n');
-          }
-          // Reset thinking state on flush
-          thinkingStarted = false;
-          callback();
+
+      upRes.on('data', chunk => {
+        const str = chunk.toString();
+        // Detect tool call by looking for tool_call or tool_calls in the SSE data
+        if (str.includes('tool_call') || str.includes('tool_calls')) {
+          isToolCall = true;
+          toolCallDetected = true;
+        }
+        if (isToolCall) {
+          toolCallBuffer += str;
+        } else {
+          // Stream normal content and reasoning
+          res.write(str);
+        }
+        if (str.includes('[DONE]')) {
+          doneReceived = true;
         }
       });
-      pipeline(upRes, thinkTransform, res, (err) => {
-        cleanupStream('pipeline completion');
-        
-        if (err) {
-          const isClientDisconnect = ['ECONNRESET', 'EPIPE', 'ECONNABORTED', 'ENOTFOUND', 'ETIMEDOUT'].includes(err.code);
-          if (isClientDisconnect) {
-            verboseLog(`[POST] Client disconnected from ${req.originalUrl}: ${err.code}`);
-          } else {
-            console.error(`[POST] Pipeline error for ${req.originalUrl}:`, err);
-          }
-        } else {
-          verboseLog(`[POST] Response piped to client for ${req.originalUrl}`);
+      upRes.on('end', () => {
+        if (toolCallDetected) {
+          // Send buffered tool call result as a single message
+          res.write(toolCallBuffer);
         }
+        if (!doneReceived) {
+          res.write('data: [DONE]\n\n');
+        }
+        cleanupStream('stream end');
       });
     } else {
-      // For non-streaming responses, handle reasoning_content based on thinking mode
+      // Non-streaming: handle as before
       let raw = '';
       upRes.on('data', chunk => { raw += chunk.toString(); });
       upRes.on('end', () => {
-        // Try to parse JSON and handle reasoning_content based on mode
         let data;
         try { data = JSON.parse(raw); } catch { data = raw; }
-        
         if (typeof data === 'object' && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.reasoning_content) {
           const reasoningContent = data.choices[0].message.reasoning_content;
-          
-          if (THINKING_DEBUG) {
-            console.log(`🧠 [THINKING] Non-streaming reasoning content length: ${reasoningContent.length}`);
-          }
-          
-          // Handle different thinking modes for non-streaming
           if (THINKING_MODE === 'show_reasoning') {
-            // Place reasoning into final message content for visibility in clients
             const modifiedData = { ...data };
             if (modifiedData.choices && modifiedData.choices[0] && modifiedData.choices[0].message) {
               const orig = modifiedData.choices[0].message.content || '';
               modifiedData.choices[0].message.content = `💭 ${reasoningContent}\n\n${orig}`;
-              // Remove reasoning_content to avoid clients rejecting unexpected field
               delete modifiedData.choices[0].message.reasoning_content;
               data = modifiedData;
             }
@@ -616,27 +469,19 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
         }
         res.writeHead(upRes.statusCode || 500, responseHeaders);
         res.end(JSON.stringify(data));
-        
         cleanupStream('non-streaming response');
       });
     }
   });
   upstreamReq.on('error', (err) => {
     console.error(`[POST] Upstream request error for ${req.originalUrl}:`, err);
-    
     cleanupStream('upstream error');
-    
     if (!res.headersSent) {
       res.status(502).json({ error: 'upstream_connection_error', message: err.message });
     }
   });
-  // Note: Removed aggressive req.on('close') handler that was cleaning up streams too early
-  // Stream cleanup should only happen when the actual response pipeline completes
-  // The original handler was causing interference issues by decrementing activeStreams 
-  // before the upstream response was actually finished processing
   req.on('error', (err) => {
     cleanupStream('request error');
-    
     const isClientDisconnect = ['ECONNRESET', 'EPIPE', 'ECONNABORTED'].includes(err.code);
     if (isClientDisconnect) {
       if (process.env.VERBOSE) console.log(`[POST] Client connection error for ${req.originalUrl}: ${err.code}`);
@@ -646,13 +491,7 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
   });
   upstreamReq.write(payload);
   upstreamReq.end();
-  
-  // Start immediate heartbeats for large prompts to prevent client timeout
-  // This is crucial for large prompts where upstream processing can take a long time
   if (estimatedTokens > 1000) {
-    console.log(`📡 [INFO] Starting immediate heartbeats for large prompt (~${estimatedTokens} tokens)`);
-    
-    // Send initial response headers and heartbeats immediately
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
@@ -663,22 +502,16 @@ app.post(/^(\/(v1\/)?){0,1}chat\/completions$/, (req, res) => {
       'X-Accel-Buffering': 'no'
     });
     res.flushHeaders();
-    
-    // Send initial heartbeats
     res.write(': heartbeat-initial\n\n');
     res.write(': processing-large-prompt\n\n');
-    
-    // Start periodic heartbeats
     heartbeatInterval = setInterval(() => {
       if (!res.destroyed && !res.writableEnded) {
         res.write(': heartbeat-waiting\n\n');
       } else {
         clearInterval(heartbeatInterval);
       }
-    }, 1000); // More frequent heartbeats during waiting
+    }, 1000);
   }
-  
-  // Log that we've sent the request to upstream
   console.log(`📤 [INFO] Sent request to upstream (~${estimatedTokens} tokens). Waiting for processing...`);
 });
 // Debug endpoint to inspect minified JSON payload
