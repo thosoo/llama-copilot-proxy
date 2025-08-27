@@ -14,7 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 FROM base AS prod
 WORKDIR /app
 COPY . .
-ENV UPSTREAM=http://127.0.0.1:8080
+ENV UPSTREAM=http://10.66.0.7:8080
+ENV LISTEN_HOST=0.0.0.0
 ENV LISTEN_PORT=11434
 ENV THINKING_MODE=default
 ENV THINKING_DEBUG=false
