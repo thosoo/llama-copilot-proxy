@@ -14,6 +14,7 @@ app = Flask(__name__)
 
 # Runtime configuration (environment-driven)
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "11434"))
+LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
 UPSTREAM = os.environ.get("UPSTREAM", "http://10.66.0.7:8080")
 THINKING_MODE = os.environ.get("THINKING_MODE", "default")
 THINKING_DEBUG = os.environ.get("THINKING_DEBUG", "false").lower() in ("1", "true", "yes")
@@ -769,7 +770,7 @@ def _print_banner():
     print("A seamless bridge for VS Code Copilot and local llama.cpp (llama-server) with tool support.")
     print(f"🕐 Started at: {startup_time} (PID: {os.getpid()})")
     print("===========================================\n")
-    print(f"Proxy listening on http://0.0.0.0:{LISTEN_PORT} (all interfaces)")
+    print(f"Proxy listening on http://{LISTEN_HOST}:{LISTEN_PORT} (all interfaces if 0.0.0.0)")
     print(f"Upstream target: {UPSTREAM}")
     print(f"Configure VS Code to use: http://127.0.0.1:{LISTEN_PORT}")
     print("Instead of: http://127.0.0.1:11433\n")
@@ -788,4 +789,4 @@ def _print_banner():
 if __name__ == "__main__":
     _print_banner()
     # threaded=True to allow background timer and queued processing
-    app.run(host="0.0.0.0", port=LISTEN_PORT, threaded=True)
+    app.run(host=LISTEN_HOST, port=LISTEN_PORT, threaded=True)
