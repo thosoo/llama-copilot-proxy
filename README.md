@@ -18,6 +18,9 @@ This project enables VS Code Copilot Agent Mode to work with local llama.cpp mod
 - **Multimodal Support**: Passes through image/text payloads when enabled (see [llama.cpp multimodal docs](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md))
 - **GGUF Format**: Ensure your model is in GGUF format ([GGUF guide](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md))
 - **Chat Templates**: For agent mode and tool use, specify a compatible chat template (e.g., `--chat-template chatml`). See [supported templates](https://github.com/ggml-org/llama.cpp/wiki/Templates-supported-by-llama_chat_apply_template).
+- **Model Aliasing**: Friendly model names in Copilot UI (e.g., "Qwen3-8B-Q8_0" instead of full paths); automatic resolution across endpoints.
+- **Expanded Capabilities**: Advertises "chat", "embeddings", "tools", "planAndExecute" to enable Copilot Ask and Agent modes.
+- **Embeddings Support**: `/api/embed` and `/api/embeddings` endpoints mapping to `/v1/embeddings` with shape conversion.
 
 
 ## Copilot vs llama.cpp API/Schema Differences
@@ -65,6 +68,9 @@ VS Code Copilot Agent Mode expects Ollama-style endpoints and OpenAI function ca
   - Minifies JSON payloads
   - Auto-patches missing `parameters` objects in tool definitions
   - Passes through OpenAI-format payloads unchanged to llama.cpp
+  - Adapts `/v1/models` to Ollama `/api/tags` shape with friendly aliases and expanded capabilities
+  - Maps `/api/embed` and `/api/embeddings` to `/v1/embeddings` with response shape conversion
+  - Resolves model aliases in chat, show, and embed requests
 
 **References:**
 - [llama.cpp Function Calling Documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/function-calling.md)
@@ -76,6 +82,10 @@ VS Code Copilot Agent Mode expects Ollama-style endpoints and OpenAI function ca
 ```
 VS Code Copilot (BYOK) → Python Proxy (Port 11434) → llama.cpp (llama-server, Port 8080)
   /api/chat                                      /v1/chat/completions
+  /api/tags                                       /v1/models (adapted)
+  /api/show                                       /v1/models/{id} or /api/show
+  /api/embed                                      /v1/embeddings
+  /api/embeddings                                 /v1/embeddings
 ```
 
 ## Quick Start
@@ -244,6 +254,28 @@ curl -X POST http://127.0.0.1:11434/api/chat \
   }'
 ```
 
+### Embeddings Example
+Send a POST request to `/api/embed` or `/api/embeddings` (maps to `/v1/embeddings`):
+```bash
+curl -X POST http://127.0.0.1:11434/api/embed \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "your-model", "input": "Hello, world!"}'
+```
+Response (single input):
+```json
+{"embedding": [0.1, 0.2, ...]}
+```
+For multiple inputs:
+```bash
+curl -X POST http://127.0.0.1:11434/api/embeddings \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "your-model", "input": ["Hello!", "World!"]}'
+```
+Response:
+```json
+{"embeddings": [[0.1, 0.2, ...], [0.3, 0.4, ...]]}
+```
+
 ## Environment Variables
 
 ### THINKING_MODE Details
@@ -265,6 +297,8 @@ curl -X POST http://127.0.0.1:11434/api/chat \
     - `off`: Disable thinking events
     - `show_reasoning`: Route thinking to normal content stream (VSCode will display it!)
 - `THINKING_DEBUG` — Enable debug mode for thinking events (`true` or `false`).
+
+**Note:** Model aliasing is automatic; friendly names are derived from model IDs/paths and resolved transparently in requests.
 
 Set environment variables before starting the proxy:
 ```bash
@@ -302,6 +336,19 @@ VERBOSE=1 LISTEN_PORT=11434 UPSTREAM=http://127.0.0.1:8080 THINKING_MODE=show_re
 - Ensure the model is loaded and ready to accept requests.
 - Try restarting both the proxy and llama-server.
 
+**Embeddings endpoint returns 404**
+- Ensure the upstream llama-server supports `/v1/embeddings` (available in recent llama.cpp versions).
+- Check proxy logs for fallback attempts; if upstream doesn't support embeddings, the proxy will return 404.
+
+**Copilot shows models but they are not selectable for Ask/Agent**
+- Verify that `/api/tags` returns models with capabilities including "chat", "embeddings", "tools", "planAndExecute".
+- Enable `VERBOSE=1` and check logs for `/api/tags` and `/api/show` to ensure capabilities are injected.
+- Restart VS Code Copilot after proxy changes.
+
+**Model aliasing not working (e.g., full paths shown instead of friendly names)**
+- Check that `/api/tags` emits friendly names in the "name" field.
+- Ensure the alias map is populated; with `VERBOSE=1`, look for "🔗 [ALIASES]" logs.
+
 **Performance is slow**
 - Use models with lower quantization for faster inference.
 - Run both proxy and llama-server on the same machine for minimal latency.
@@ -327,6 +374,15 @@ VERBOSE=1 LISTEN_PORT=11434 UPSTREAM=http://127.0.0.1:8080 THINKING_MODE=show_re
 - **Upstream Optimization:** Ensure llama-server is started with optimal flags for your model and workload (see llama.cpp docs for details).
 
 ## FAQ
+
+**Q: How does model aliasing work?**
+A: The proxy automatically creates friendly names (e.g., "Qwen3-8B-Q8_0") from model IDs/paths for display in Copilot. These aliases are resolved transparently in requests to the upstream server.
+
+**Q: Why are some models not selectable in Copilot Ask/Agent mode?**
+A: Ensure the proxy advertises the required capabilities ("chat", "embeddings", "tools", "planAndExecute") in `/api/tags` and `/api/show`. Check with `VERBOSE=1` for injection logs.
+
+**Q: Does the proxy support embeddings?**
+A: Yes, `/api/embed` and `/api/embeddings` map to `/v1/embeddings` with automatic response shape conversion to Ollama-compatible format.
 
 **Q: Can I use this proxy with any LLM model?**
 A: The proxy works with llama.cpp-compatible models that support OpenAI function calling format, GGUF format, and chat templates. For best results, use models with tool and multimodal support and start llama-server with `--jinja` and `--mm` if needed.
@@ -358,11 +414,18 @@ A: The proxy is designed for local development and experimentation. For producti
 - [Flask Documentation](https://flask.palletsprojects.com/)
 ## Python Endpoints
 
-### `/v1/chat/completions` and `/chat/completions`
-POST endpoint for chat completions, supports streaming and tool-calling. Accepts OpenAI-style payloads and proxies to upstream llama-server.
+### Ollama-Compatible Endpoints
+- `/api/version` (GET/HEAD): Returns proxy version and status for Copilot detection.
+- `/api/tags` (GET): Lists models with friendly aliases and expanded capabilities (maps to `/v1/models`).
+- `/api/show` (POST): Shows model details with capabilities (maps to `/v1/models/{id}` or fallback `/api/show`).
+- `/api/chat` (POST): Chat completions with streaming and tool support (maps to `/v1/chat/completions`).
+- `/api/embed` and `/api/embeddings` (POST): Embeddings generation (maps to `/v1/embeddings` with shape conversion).
 
-### `/debug/json`
-POST endpoint for debugging JSON payloads (minifies and returns input).
+### OpenAI-Compatible Endpoints
+- `/v1/chat/completions` and `/chat/completions` (POST): Direct chat completions, supports streaming and tool-calling. Accepts OpenAI-style payloads and proxies to upstream llama-server.
+
+### Utility Endpoints
+- `/debug/json` (POST): For debugging JSON payloads (minifies and returns input).
 
 ### Fallback Proxy
 All other paths are proxied to the upstream server, preserving method and payload.
