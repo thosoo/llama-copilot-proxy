@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
-from flask import Flask, Response, jsonify, request, stream_with_context
+from flask import Flask, Response, jsonify, request, stream_with_context, g
 
 
 # Application globals and configuration defaults (restore if missing)
@@ -18,8 +18,9 @@ UPSTREAM = os.environ.get("UPSTREAM", "http://10.66.0.7:8080")
 THINKING_MODE = os.environ.get("THINKING_MODE", "default")
 THINKING_DEBUG = os.environ.get("THINKING_DEBUG", "false").lower() in ("1", "true", "yes")
 VERBOSE = os.environ.get("VERBOSE", "false").lower() in ("1", "true", "yes")
-VERSION = "dev"
+VERSION = "1.0.0"
 active_streams = 0
+MODEL_ALIASES: Dict[str, str] = {}
 
 
 def estimate_tokens_from_messages(messages: Optional[List[Dict[str, Any]]]) -> int:
@@ -68,6 +69,41 @@ def _join_with_newline(a: str, b: str) -> str:
 def patch_tools_array(arr: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     # Minimal pass-through for tools; preserve existing entries
     return arr
+
+
+def _friendly_model_name(mid: str) -> str:
+    """Derive a human-friendly alias from a model id or file path."""
+    try:
+        base = os.path.basename(mid)
+        # strip common extensions
+        for ext in (".gguf", ".bin", ".pt", ".pth"):
+            if base.endswith(ext):
+                base = base[: -len(ext)]
+        # collapse whitespace
+        base = " ".join(base.split())
+        return base or mid
+    except Exception:
+        return str(mid)
+
+
+def _register_model_alias(alias: str, real_id: str):
+    if not alias or not real_id:
+        return
+    key = alias
+    idx = 2
+    # Ensure uniqueness if multiple models collapse to the same alias
+    while key in MODEL_ALIASES and MODEL_ALIASES.get(key) != real_id:
+        key = f"{alias} ({idx})"
+        idx += 1
+    MODEL_ALIASES[key] = real_id
+    if VERBOSE:
+        print(f"🔗 [ALIASES] {key} -> {real_id}")
+
+
+def _resolve_model_id(maybe_alias: Optional[str]) -> Optional[str]:
+    if not maybe_alias:
+        return maybe_alias
+    return MODEL_ALIASES.get(maybe_alias, maybe_alias)
 
 
 def process_queued_show_requests():
@@ -352,6 +388,296 @@ def _prepare_chat_body_and_log(body: Dict[str, Any]) -> Dict[str, Any]:
     if VERBOSE:
         print("📤 [PAYLOAD] Full request payload:", json.dumps(body, indent=2))
     return body
+
+
+# --- Lightweight request/response logging (enable with VERBOSE=1) ---
+@app.before_request
+def _dbg_before_request():
+    if VERBOSE:
+        g.__dict__["_start_ts"] = time.time()
+        ua = request.headers.get("user-agent", "-")
+        print(f"➡️  [REQ] {request.method} {request.path} UA={ua}")
+
+
+@app.after_request
+def _dbg_after_request(resp):
+    if VERBOSE:
+        try:
+            start = g.__dict__.get("_start_ts")
+            dur_ms = int((time.time() - start) * 1000) if start else -1
+        except Exception:
+            dur_ms = -1
+        print(f"⬅️  [RESP] {request.method} {request.path} -> {resp.status_code} in {dur_ms}ms")
+    return resp
+
+
+# --- Ollama compatibility endpoints expected by Copilot ---
+
+@app.route("/api/version", methods=["GET", "HEAD"])  # HEAD used by some clients
+def api_version():
+    # Return a simple OK + version so Copilot detects the provider
+    # Keep shape compatible with Ollama's /api/version
+    if VERBOSE:
+        print("🔎 [/api/version] responding with status ok and version:", VERSION)
+    return jsonify({"status": "ok", "version": VERSION or "0.0.0"})
+
+
+@app.post("/api/chat")
+def api_chat_compat():
+    # Map Ollama-style /api/chat to OpenAI /v1/chat/completions with thinking support
+    print(f"[POST] Proxying Copilot /api/chat -> /v1/chat/completions")
+    if VERBOSE:
+        print("[POST] Headers:", dict(request.headers))
+    body = request.get_json(silent=True) or {}
+    if isinstance(body.get("model"), str):
+        original = body["model"]
+        body["model"] = _resolve_model_id(original)
+        if VERBOSE and body["model"] != original:
+            print(f"🔁 [/api/chat] Resolved model alias '{original}' -> '{body['model']}'")
+    body = _prepare_chat_body_and_log(body)
+    _increment_streams()
+
+    upstream_url = f"{UPSTREAM}/v1/chat/completions"
+    try:
+        generator = _stream_chat_completion(upstream_url, body)
+
+        def _cleanup_generator(gen):
+            try:
+                for x in gen:
+                    yield x
+            finally:
+                _decrement_streams("stream end")
+
+        return Response(stream_with_context(_cleanup_generator(generator)), mimetype="text/event-stream")
+    except Exception as e:
+        _decrement_streams("upstream error")
+        print(f"[POST] Upstream request error for /api/chat:", e)
+        return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
+
+
+def _oai_models_to_ollama_tags(oai_models: Dict[str, Any]) -> Dict[str, Any]:
+    """Adapt OpenAI-style /v1/models list to Ollama /api/tags shape minimally."""
+    models_in = []
+    if isinstance(oai_models, dict) and isinstance(oai_models.get("data"), list):
+        models_in = oai_models["data"]
+    out = {"models": []}
+    def _add_caps(entry: Dict[str, Any]) -> Dict[str, Any]:
+        caps = set(entry.get("capabilities") or [])
+        # Expand capabilities to satisfy Copilot Ask/Agent checks
+        caps.update(["completion", "chat", "embeddings", "tools", "planAndExecute"])  # help Copilot feature detection
+        entry["capabilities"] = sorted(caps)
+        return entry
+    for m in models_in:
+        mid = m.get("id") if isinstance(m, dict) else None
+        created = m.get("created") if isinstance(m, dict) else None
+        try:
+            # created is seconds-epoch in OAI; convert to ISO8601 if present
+            modified_at = (
+                datetime.fromtimestamp(created, tz=timezone.utc).isoformat()
+                if isinstance(created, (int, float)) else datetime.now(timezone.utc).isoformat()
+            )
+        except Exception:
+            modified_at = datetime.now(timezone.utc).isoformat()
+        alias = _friendly_model_name(mid or "unknown")
+        _register_model_alias(alias, mid or "unknown")
+        entry = {
+            "name": alias,
+            "model": mid or "unknown",
+            "modified_at": modified_at,
+            "size": 0,
+            "digest": "",
+            "details": {
+                "parent_model": "",
+                "format": "gguf",
+                "family": "",
+                "families": [],
+                "parameter_size": "",
+                "quantization_level": ""
+            }
+        }
+        out["models"].append(_add_caps(entry))
+    return out
+
+
+@app.get("/api/tags")
+def api_tags():
+    # List local models; if upstream is llama.cpp (OpenAI), adapt /v1/models
+    try:
+        if VERBOSE:
+            print(f"🔎 [/api/tags] Fetching upstream models from {UPSTREAM}/v1/models ...")
+        r = requests.get(f"{UPSTREAM}/v1/models", timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        # Normalize into Ollama tags shape with friendly aliases and consistent capabilities
+        MODEL_ALIASES.clear()
+        models_out: List[Dict[str, Any]] = []
+        if isinstance(data, dict) and isinstance(data.get("models"), list):
+            src_models = data["models"]
+            for e in src_models:
+                if not isinstance(e, dict):
+                    continue
+                mid = e.get("id") or e.get("model") or e.get("name")
+                if not isinstance(mid, str):
+                    continue
+                alias = _friendly_model_name(mid)
+                _register_model_alias(alias, mid)
+                modified_at = e.get("modified_at") or e.get("created")
+                try:
+                    if isinstance(modified_at, (int, float)):
+                        modified_at = datetime.fromtimestamp(modified_at, tz=timezone.utc).isoformat()
+                    elif not isinstance(modified_at, str):
+                        modified_at = datetime.now(timezone.utc).isoformat()
+                except Exception:
+                    modified_at = datetime.now(timezone.utc).isoformat()
+                details = e.get("details") or {}
+                entry = {
+                    "name": alias,
+                    "model": mid,
+                    "modified_at": modified_at,
+                    "size": e.get("size", 0),
+                    "digest": e.get("digest", ""),
+                    "details": {
+                        "parent_model": details.get("parent_model", ""),
+                        "format": details.get("format", "gguf"),
+                        "family": details.get("family", ""),
+                        "families": details.get("families", []),
+                        "parameter_size": details.get("parameter_size", ""),
+                        "quantization_level": details.get("quantization_level", ""),
+                    },
+                }
+                caps = set(e.get("capabilities") or [])
+                caps.update(["completion", "chat", "embeddings", "tools", "planAndExecute"])  # inject
+                entry["capabilities"] = sorted(caps)
+                models_out.append(entry)
+        else:
+            adapted = _oai_models_to_ollama_tags(data)
+            models_out = adapted.get("models", [])
+        count = len(models_out)
+        if VERBOSE:
+            print(f"🔎 [/api/tags] Normalized models (models={count}) with aliases; capabilities injected")
+        return jsonify({"models": models_out})
+    except Exception as e:
+        if VERBOSE:
+            print("[GET] /api/tags upstream error:", e)
+        return jsonify({"models": []}), 200
+
+
+@app.post("/api/show")
+def api_show():
+    # Show model information; map to /v1/models/{model} when Ollama endpoint is unavailable
+    body = request.get_json(silent=True) or {}
+    model = _resolve_model_id(body.get("model"))
+    if not isinstance(model, str) or not model:
+        return jsonify({"error": "bad_request", "message": "Missing 'model' in body"}), 400
+    # Try llama.cpp OpenAI-compatible endpoint
+    try:
+        if VERBOSE:
+            print(f"🔎 [/api/show] Request for model='{model}' -> querying {UPSTREAM}/v1/models/{model}")
+        # URL-encode model id in case it contains slashes or spaces
+        try:
+            from requests.utils import quote
+            model_enc = quote(model, safe="")
+        except Exception:
+            model_enc = model
+        r = requests.get(f"{UPSTREAM}/v1/models/{model_enc}", timeout=15)
+        if r.status_code == 200:
+            info = r.json()
+            # Provide a minimal Ollama-like show payload
+            resp = {
+                "modelfile": "",
+                "parameters": "",
+                "template": "",
+                "details": {
+                    "parent_model": "",
+                    "format": "gguf",
+                    "family": info.get("owned_by", ""),
+                    "families": [info.get("owned_by")] if info.get("owned_by") else [],
+                    "parameter_size": "",
+                    "quantization_level": ""
+                },
+                "model_info": {},
+                # Keep capabilities consistent with /api/tags for selection in Ask/Agent
+                "capabilities": ["completion", "chat", "embeddings", "tools", "planAndExecute"],
+            }
+            if VERBOSE:
+                print("🔎 [/api/show] Returning minimal Ollama-like info with capabilities",
+                      resp.get("capabilities"))
+            return jsonify(resp)
+    except Exception as e:
+        if VERBOSE:
+            print("[POST] /api/show upstream (v1/models/{id}) error:", e)
+    # Fallback: try native Ollama if upstream provides it
+    try:
+        if VERBOSE:
+            print(f"🔎 [/api/show] Falling back to upstream {UPSTREAM}/api/show")
+        r2 = requests.post(f"{UPSTREAM}/api/show", json={"model": model}, timeout=15)
+        if r2.status_code == 200:
+            # Try to inject capabilities into fallback JSON
+            try:
+                obj = r2.json()
+                if isinstance(obj, dict):
+                    caps = set((obj.get("capabilities") or []))
+                    caps.update(["completion", "chat", "embeddings", "tools", "planAndExecute"])
+                    obj["capabilities"] = sorted(caps)
+                    return jsonify(obj), 200
+            except Exception:
+                pass
+            return Response(r2.content, status=200, headers={k: v for k, v in r2.headers.items() if k.lower() not in {"content-encoding", "transfer-encoding", "content-length", "connection"}})
+    except Exception:
+        pass
+    # Last resort: return minimal stub so Copilot doesn't error out
+    return jsonify({
+        "details": {"format": "gguf", "family": "", "families": []},
+        "capabilities": ["completion", "chat", "embeddings", "tools", "planAndExecute"],
+    }), 200
+
+
+@app.post("/api/embed")
+def api_embed():
+    # Map Ollama /api/embed to OpenAI /v1/embeddings when using llama.cpp
+    try:
+        body = request.get_json(silent=True) or {}
+        if isinstance(body.get("model"), str):
+            original = body["model"]
+            body["model"] = _resolve_model_id(original)
+            if VERBOSE and body["model"] != original:
+                print(f"🔁 [/api/embed] Resolved model alias '{original}' -> '{body['model']}'")
+        if VERBOSE:
+            shape = {
+                "has_model": isinstance(body, dict) and bool(body.get("model")),
+                "input_type": type((body or {}).get("input")).__name__ if isinstance(body, dict) else None,
+            }
+            print("🔎 [/api/embed] Proxying to /v1/embeddings with shape:", shape)
+        r = requests.post(f"{UPSTREAM}/v1/embeddings", json=body, timeout=60)
+        # Try to convert OpenAI response to Ollama shape for better client compatibility
+        try:
+            obj = r.json()
+            embeddings = None
+            if isinstance(obj, dict) and isinstance(obj.get("data"), list):
+                data_list = obj["data"]
+                if len(data_list) == 1:
+                    embeddings = data_list[0].get("embedding")
+                else:
+                    embeddings = [d.get("embedding") for d in data_list]
+            if embeddings is not None:
+                if isinstance(embeddings, list) and embeddings and isinstance(embeddings[0], list):
+                    return jsonify({"embeddings": embeddings})
+                else:
+                    return jsonify({"embedding": embeddings})
+        except Exception:
+            pass
+        return Response(r.content, status=r.status_code, headers={k: v for k, v in r.headers.items() if k.lower() not in {"content-encoding", "transfer-encoding", "content-length", "connection"}})
+    except Exception as e:
+        if VERBOSE:
+            print("[POST] /api/embed upstream error:", e)
+        return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
+
+
+# Alias to match Ollama's embeddings endpoint expected by some clients
+@app.post("/api/embeddings")
+def api_embeddings():
+    # Delegate to the same handler as /api/embed
+    return api_embed()
 
 
 @app.route("/v1/chat/completions", methods=["POST"])
