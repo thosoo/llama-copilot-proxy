@@ -772,8 +772,6 @@ def _print_banner():
     print("===========================================\n")
     print(f"Proxy listening on http://{LISTEN_HOST}:{LISTEN_PORT} (all interfaces if 0.0.0.0)")
     print(f"Upstream target: {UPSTREAM}")
-    print(f"Configure VS Code to use: http://127.0.0.1:{LISTEN_PORT}")
-    print("Instead of: http://127.0.0.1:11433\n")
     print("🧠 Thinking Mode Configuration:")
     print(f"   Mode: {THINKING_MODE}")
     print(f"   Debug: {'enabled' if THINKING_DEBUG else 'disabled'}")
