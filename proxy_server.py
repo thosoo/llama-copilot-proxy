@@ -225,18 +225,28 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                         continue
 
                     if ("tool_call" in event_payload) or ("tool_calls" in event_payload):
+                        # Enter tool-call buffering mode, but don't append raw SSE.
+                        # We'll buffer the parsed JSON in the selected output format below.
                         is_tool_call = True
                         tool_call_detected = True
-                        tool_call_buffer.append(event_raw)
-                        continue
 
                     try:
                         obj = json.loads(event_payload)
                     except Exception:
-                        if is_tool_call:
-                            tool_call_buffer.append(event_raw)
+                        # If parsing fails, avoid emitting raw SSE to NDJSON clients.
+                        if output_mode == "ndjson":
+                            if event_payload.strip():
+                                line = json.dumps({"value": event_payload}) + "\n"
+                                if is_tool_call:
+                                    tool_call_buffer.append(line)
+                                else:
+                                    yield line
+                            # empty payload -> skip
                         else:
-                            yield event_raw
+                            if is_tool_call:
+                                tool_call_buffer.append(event_raw)
+                            else:
+                                yield event_raw
                         continue
 
                     # Ensure NDJSON clients always receive a JSON object (map).
