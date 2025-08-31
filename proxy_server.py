@@ -351,6 +351,24 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any]):
             yield json.dumps(data)
 
 
+def _client_wants_stream(body: Dict[str, Any]) -> bool:
+    """Interpret various client-provided stream flags strictly.
+
+    Return True only for explicit true-like values (True, 'true', '1', 1, 'yes').
+    Treat 'false' or any non-true-like value as False.
+    """
+    if body is None:
+        return False
+    s = body.get("stream")
+    if isinstance(s, bool):
+        return s
+    if isinstance(s, (int, float)):
+        return bool(s)
+    if isinstance(s, str):
+        return s.strip().lower() in ("1", "true", "yes")
+    return False
+
+
 def _increment_streams():
     global active_streams
     active_streams += 1
@@ -444,7 +462,7 @@ def api_chat_compat():
 
     upstream_url = f"{UPSTREAM}/v1/chat/completions"
     # If client requested streaming, use SSE generator path; otherwise proxy as JSON
-    if body.get("stream"):
+    if _client_wants_stream(body):
         _increment_streams()
         try:
             generator = _stream_chat_completion(upstream_url, body)
@@ -713,7 +731,7 @@ def chat_completions():
     body = _prepare_chat_body_and_log(body)
 
     upstream_url = f"{UPSTREAM}{request.path}"
-    if body.get("stream"):
+    if _client_wants_stream(body):
         _increment_streams()
         try:
             generator = _stream_chat_completion(upstream_url, body)
