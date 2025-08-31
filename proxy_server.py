@@ -114,7 +114,7 @@ def process_queued_show_requests():
 
 
 
-def _stream_chat_completion(upstream_url: str, body: Dict[str, Any]):
+def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode: str = "sse"):
     """Stream chat completions from upstream, injecting reasoning_content
     into visible content when THINKING_MODE == 'show_reasoning'. This
     reassembles SSE chunks, parses JSON payloads, and forwards events as
@@ -132,6 +132,8 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any]):
         content_type = r.headers.get("content-type", "")
         vlog(f"[POST] Upstream response status: {r.status_code}")
         vlog(f"[POST] Upstream response headers: {dict(r.headers)}")
+        if THINKING_DEBUG:
+            print(f"🔧 [STREAM] generator start: output_mode={output_mode!r} upstream_content_type={content_type!r}")
 
         # Determine whether upstream is sending SSE and proceed with streaming
         is_streaming = "text/event-stream" in content_type
@@ -147,8 +149,12 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any]):
 
         # Initial heartbeats (only emitted when this generator is used,
         # which happens for client-requested streaming paths)
-        yield ": heartbeat\n\n"
-        yield ": processing-prompt\n\n"
+        if output_mode == "sse":
+            yield ": heartbeat\n\n"
+            yield ": processing-prompt\n\n"
+        else:
+            yield json.dumps({"type": "heartbeat"}) + "\n"
+            yield json.dumps({"type": "processing-prompt"}) + "\n"
 
         if is_streaming:
             buffer = ""
@@ -300,11 +306,19 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any]):
                     except Exception:
                         out_payload = event_payload
 
-                    out_event = f"data: {out_payload}\n\n"
-                    if is_tool_call:
-                        tool_call_buffer.append(out_event)
+                    if output_mode == "sse":
+                        out_event = f"data: {out_payload}\n\n"
+                        if is_tool_call:
+                            tool_call_buffer.append(out_event)
+                        else:
+                            yield out_event
                     else:
-                        yield out_event
+                        # NDJSON line
+                        line = out_payload + "\n"
+                        if is_tool_call:
+                            tool_call_buffer.append(line)
+                        else:
+                            yield line
 
             if tool_call_detected:
                 yield "".join(tool_call_buffer)
@@ -316,11 +330,17 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any]):
                             {"delta": {"content": pre_reasoning_content_buffer}}
                         ]
                     }
-                    yield f"data: {json.dumps(flush_obj)}\n\n"
+                    if output_mode == "sse":
+                        yield f"data: {json.dumps(flush_obj)}\n\n"
+                    else:
+                        yield json.dumps(flush_obj) + "\n"
                 except Exception:
                     pass
             if not done_received:
-                yield "data: [DONE]\n\n"
+                if output_mode == "sse":
+                    yield "data: [DONE]\n\n"
+                else:
+                    yield json.dumps({"done": True}) + "\n"
         else:
             raw = r.content
             try:
@@ -465,7 +485,11 @@ def api_chat_compat():
     if _client_wants_stream(body):
         _increment_streams()
         try:
-            generator = _stream_chat_completion(upstream_url, body)
+            accept = request.headers.get("Accept", "")
+            output_mode = "ndjson" if "application/x-ndjson" in accept or "application/json" in accept else "sse"
+            if THINKING_DEBUG:
+                print(f"🔧 [STREAM] /api/chat selected output_mode={output_mode!r} Accept={accept!r} stream={body.get('stream')!r}")
+            generator = _stream_chat_completion(upstream_url, body, output_mode=output_mode)
 
             def _cleanup_generator(gen):
                 try:
@@ -474,13 +498,16 @@ def api_chat_compat():
                 finally:
                     _decrement_streams("stream end")
 
-            return Response(stream_with_context(_cleanup_generator(generator)), mimetype="text/event-stream")
+            mimetype = "application/x-ndjson" if output_mode == "ndjson" else "text/event-stream"
+            return Response(stream_with_context(_cleanup_generator(generator)), mimetype=mimetype)
         except Exception as e:
             _decrement_streams("upstream error")
             print(f"[POST] Upstream request error for /api/chat:", e)
             return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
-    else:
+        else:
         # Non-streaming: simply forward as JSON and return application/json without heartbeat lines
+            if THINKING_DEBUG:
+                print(f"🔧 [STREAM] /api/chat non-streaming path (stream={body.get('stream')!r})")
         try:
             resp = requests.post(upstream_url, json=body, timeout=120)
             resp.raise_for_status()
@@ -734,7 +761,11 @@ def chat_completions():
     if _client_wants_stream(body):
         _increment_streams()
         try:
-            generator = _stream_chat_completion(upstream_url, body)
+            accept = request.headers.get("Accept", "")
+            output_mode = "ndjson" if "application/x-ndjson" in accept or "application/json" in accept else "sse"
+            if THINKING_DEBUG:
+                print(f"🔧 [STREAM] {request.path} selected output_mode={output_mode!r} Accept={accept!r} stream={body.get('stream')!r}")
+            generator = _stream_chat_completion(upstream_url, body, output_mode=output_mode)
 
             def _cleanup_generator(gen):
                 try:
@@ -743,13 +774,16 @@ def chat_completions():
                 finally:
                     _decrement_streams("stream end")
 
-            return Response(stream_with_context(_cleanup_generator(generator)), mimetype="text/event-stream")
+            mimetype = "application/x-ndjson" if output_mode == "ndjson" else "text/event-stream"
+            return Response(stream_with_context(_cleanup_generator(generator)), mimetype=mimetype)
         except Exception as e:
             _decrement_streams("upstream error")
             print(f"[POST] Upstream request error for {request.path}:", e)
             return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
-    else:
+        else:
         # Non-streaming: forward as a normal JSON request and return application/json (no heartbeats)
+            if THINKING_DEBUG:
+                print(f"🔧 [STREAM] {request.path} non-streaming path (stream={body.get('stream')!r})")
         try:
             resp = requests.post(upstream_url, json=body, timeout=120)
             resp.raise_for_status()
