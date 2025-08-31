@@ -209,6 +209,15 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                             yield event_raw
                         continue
 
+                    # Ensure NDJSON clients always receive a JSON object (map).
+                    # If upstream provided a non-dict (null, string, list), wrap it
+                    # so client-side casts to Map<String, dynamic> succeed.
+                    try:
+                        if output_mode == "ndjson" and not isinstance(obj, dict):
+                            obj = {"value": obj}
+                    except Exception:
+                        pass
+
                     if THINKING_MODE == "show_reasoning":
                         try:
                             choices = obj.get("choices") if isinstance(obj, dict) else None
@@ -368,7 +377,27 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                     msg.pop("reasoning_content", None)
                     modified["choices"][0]["message"] = msg
                     data = modified
-            yield json.dumps(data)
+            # Emit a single, well-formed payload depending on requested output_mode.
+            try:
+                if output_mode == "ndjson":
+                    if not isinstance(data, dict):
+                        out = {"value": data}
+                    else:
+                        out = data
+                    yield json.dumps(out) + "\n"
+                else:
+                    # SSE-like: send as a single data: event (no NDJSON wrapping)
+                    yield f"data: {json.dumps(data)}\n\n"
+            except Exception:
+                # Fallback: emit raw JSON string
+                try:
+                    yield json.dumps(data) + ("\n" if output_mode == "ndjson" else "\n\n")
+                except Exception:
+                    # As a last resort emit a null placeholder
+                    if output_mode == "ndjson":
+                        yield json.dumps({"value": None}) + "\n"
+                    else:
+                        yield "data: null\n\n"
 
 
 def _client_wants_stream(body: Dict[str, Any]) -> bool:
