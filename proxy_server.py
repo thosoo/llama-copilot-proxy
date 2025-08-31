@@ -120,6 +120,9 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any]):
     reassembles SSE chunks, parses JSON payloads, and forwards events as
     SSE to the downstream client.
     """
+    # This generator handles streaming SSE-style responses from upstream.
+    # Heartbeat/event prefixes are only emitted when the client explicitly
+    # requested a streaming response via body.get("stream") == True.
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream, application/json",
@@ -130,10 +133,7 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any]):
         vlog(f"[POST] Upstream response status: {r.status_code}")
         vlog(f"[POST] Upstream response headers: {dict(r.headers)}")
 
-        # Initial heartbeats
-        yield ": heartbeat\n\n"
-        yield ": processing-prompt\n\n"
-
+        # Determine whether upstream is sending SSE and proceed with streaming
         is_streaming = "text/event-stream" in content_type
 
         tool_call_buffer: List[str] = []
@@ -144,6 +144,11 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any]):
         reasoning_pending_separator = False
         seen_reasoning = False
         pre_reasoning_content_buffer = ""
+
+        # Initial heartbeats (only emitted when this generator is used,
+        # which happens for client-requested streaming paths)
+        yield ": heartbeat\n\n"
+        yield ": processing-prompt\n\n"
 
         if is_streaming:
             buffer = ""
@@ -436,24 +441,40 @@ def api_chat_compat():
         if VERBOSE and body["model"] != original:
             print(f"🔁 [/api/chat] Resolved model alias '{original}' -> '{body['model']}'")
     body = _prepare_chat_body_and_log(body)
-    _increment_streams()
 
     upstream_url = f"{UPSTREAM}/v1/chat/completions"
-    try:
-        generator = _stream_chat_completion(upstream_url, body)
+    # If client requested streaming, use SSE generator path; otherwise proxy as JSON
+    if body.get("stream"):
+        _increment_streams()
+        try:
+            generator = _stream_chat_completion(upstream_url, body)
 
-        def _cleanup_generator(gen):
+            def _cleanup_generator(gen):
+                try:
+                    for x in gen:
+                        yield x
+                finally:
+                    _decrement_streams("stream end")
+
+            return Response(stream_with_context(_cleanup_generator(generator)), mimetype="text/event-stream")
+        except Exception as e:
+            _decrement_streams("upstream error")
+            print(f"[POST] Upstream request error for /api/chat:", e)
+            return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
+    else:
+        # Non-streaming: simply forward as JSON and return application/json without heartbeat lines
+        try:
+            resp = requests.post(upstream_url, json=body, timeout=120)
+            resp.raise_for_status()
             try:
-                for x in gen:
-                    yield x
-            finally:
-                _decrement_streams("stream end")
-
-        return Response(stream_with_context(_cleanup_generator(generator)), mimetype="text/event-stream")
-    except Exception as e:
-        _decrement_streams("upstream error")
-        print(f"[POST] Upstream request error for /api/chat:", e)
-        return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
+                data = resp.json()
+                return Response(json.dumps(data), status=resp.status_code, mimetype="application/json")
+            except Exception:
+                # If upstream returned non-JSON, return raw text
+                return Response(resp.content, status=resp.status_code, mimetype="application/json")
+        except Exception as e:
+            print(f"[POST] Upstream request error for /api/chat:", e)
+            return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
 
 
 def _oai_models_to_ollama_tags(oai_models: Dict[str, Any]) -> Dict[str, Any]:
@@ -690,24 +711,38 @@ def chat_completions():
     body = request.get_json(silent=True) or {}
 
     body = _prepare_chat_body_and_log(body)
-    _increment_streams()
 
     upstream_url = f"{UPSTREAM}{request.path}"
-    try:
-        generator = _stream_chat_completion(upstream_url, body)
+    if body.get("stream"):
+        _increment_streams()
+        try:
+            generator = _stream_chat_completion(upstream_url, body)
 
-        def _cleanup_generator(gen):
+            def _cleanup_generator(gen):
+                try:
+                    for x in gen:
+                        yield x
+                finally:
+                    _decrement_streams("stream end")
+
+            return Response(stream_with_context(_cleanup_generator(generator)), mimetype="text/event-stream")
+        except Exception as e:
+            _decrement_streams("upstream error")
+            print(f"[POST] Upstream request error for {request.path}:", e)
+            return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
+    else:
+        # Non-streaming: forward as a normal JSON request and return application/json (no heartbeats)
+        try:
+            resp = requests.post(upstream_url, json=body, timeout=120)
+            resp.raise_for_status()
             try:
-                for x in gen:
-                    yield x
-            finally:
-                _decrement_streams("stream end")
-
-        return Response(stream_with_context(_cleanup_generator(generator)), mimetype="text/event-stream")
-    except Exception as e:
-        _decrement_streams("upstream error")
-        print(f"[POST] Upstream request error for {request.path}:", e)
-        return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
+                data = resp.json()
+                return Response(json.dumps(data), status=resp.status_code, mimetype="application/json")
+            except Exception:
+                return Response(resp.content, status=resp.status_code, mimetype="application/json")
+        except Exception as e:
+            print(f"[POST] Upstream request error for {request.path}:", e)
+            return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
 
 
 @app.route("/debug/json", methods=["POST"])
