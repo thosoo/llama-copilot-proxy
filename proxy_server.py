@@ -107,6 +107,19 @@ def _resolve_model_id(maybe_alias: Optional[str]) -> Optional[str]:
     return MODEL_ALIASES.get(maybe_alias, maybe_alias)
 
 
+def _select_output_mode(accept_header: Optional[str]) -> str:
+    """Choose streaming output mode from Accept header.
+
+    - Default to SSE for OpenAI-compatible clients.
+    - Switch to NDJSON only if the client explicitly requests application/x-ndjson.
+    """
+    a = (accept_header or "").lower()
+    if "application/x-ndjson" in a:
+        return "ndjson"
+    # If client explicitly says text/event-stream, keep SSE (default anyway)
+    return "sse"
+
+
 def process_queued_show_requests():
     # Placeholder for queued processing used in original project; no-op here
     if VERBOSE:
@@ -555,9 +568,10 @@ def api_chat_compat():
         _increment_streams()
         try:
             accept = request.headers.get("Accept", "")
-            output_mode = "ndjson" if "application/x-ndjson" in accept or "application/json" in accept else "sse"
-            if THINKING_DEBUG:
-                print(f"🔧 [STREAM] /api/chat selected output_mode={output_mode!r} Accept={accept!r} stream={body.get('stream')!r}")
+            ua = request.headers.get("User-Agent", "")
+            output_mode = _select_output_mode(accept)
+            if THINKING_DEBUG or VERBOSE:
+                print(f"🔧 [STREAM] /api/chat selected output_mode={output_mode!r} Accept={accept!r} UA={ua!r} stream={body.get('stream')!r}")
             generator = _stream_chat_completion(upstream_url, body, output_mode=output_mode)
 
             def _cleanup_generator(gen):
@@ -568,15 +582,23 @@ def api_chat_compat():
                     _decrement_streams("stream end")
 
             mimetype = "application/x-ndjson" if output_mode == "ndjson" else "text/event-stream"
-            return Response(stream_with_context(_cleanup_generator(generator)), mimetype=mimetype)
+            resp = Response(stream_with_context(_cleanup_generator(generator)), mimetype=mimetype)
+            # Advise caches that representation varies by Accept
+            resp.headers["Vary"] = "Accept"
+            # SSE-specific headers
+            if output_mode == "sse":
+                resp.headers["Cache-Control"] = "no-cache"
+                resp.headers["X-Accel-Buffering"] = "no"
+                resp.headers["Connection"] = "keep-alive"
+            return resp
         except Exception as e:
             _decrement_streams("upstream error")
             print(f"[POST] Upstream request error for /api/chat:", e)
             return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
-        else:
+    else:
         # Non-streaming: simply forward as JSON and return application/json without heartbeat lines
-            if THINKING_DEBUG:
-                print(f"🔧 [STREAM] /api/chat non-streaming path (stream={body.get('stream')!r})")
+        if THINKING_DEBUG or VERBOSE:
+            print(f"🔧 [STREAM] /api/chat non-streaming path (stream={body.get('stream')!r}) Accept={request.headers.get('Accept','')!r}")
         try:
             resp = requests.post(upstream_url, json=body, timeout=120)
             resp.raise_for_status()
@@ -831,9 +853,10 @@ def chat_completions():
         _increment_streams()
         try:
             accept = request.headers.get("Accept", "")
-            output_mode = "ndjson" if "application/x-ndjson" in accept or "application/json" in accept else "sse"
-            if THINKING_DEBUG:
-                print(f"🔧 [STREAM] {request.path} selected output_mode={output_mode!r} Accept={accept!r} stream={body.get('stream')!r}")
+            ua = request.headers.get("User-Agent", "")
+            output_mode = _select_output_mode(accept)
+            if THINKING_DEBUG or VERBOSE:
+                print(f"🔧 [STREAM] {request.path} selected output_mode={output_mode!r} Accept={accept!r} UA={ua!r} stream={body.get('stream')!r}")
             generator = _stream_chat_completion(upstream_url, body, output_mode=output_mode)
 
             def _cleanup_generator(gen):
@@ -844,15 +867,21 @@ def chat_completions():
                     _decrement_streams("stream end")
 
             mimetype = "application/x-ndjson" if output_mode == "ndjson" else "text/event-stream"
-            return Response(stream_with_context(_cleanup_generator(generator)), mimetype=mimetype)
+            resp = Response(stream_with_context(_cleanup_generator(generator)), mimetype=mimetype)
+            resp.headers["Vary"] = "Accept"
+            if output_mode == "sse":
+                resp.headers["Cache-Control"] = "no-cache"
+                resp.headers["X-Accel-Buffering"] = "no"
+                resp.headers["Connection"] = "keep-alive"
+            return resp
         except Exception as e:
             _decrement_streams("upstream error")
             print(f"[POST] Upstream request error for {request.path}:", e)
             return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
-        else:
+    else:
         # Non-streaming: forward as a normal JSON request and return application/json (no heartbeats)
-            if THINKING_DEBUG:
-                print(f"🔧 [STREAM] {request.path} non-streaming path (stream={body.get('stream')!r})")
+        if THINKING_DEBUG or VERBOSE:
+            print(f"🔧 [STREAM] {request.path} non-streaming path (stream={body.get('stream')!r}) Accept={request.headers.get('Accept','')!r}")
         try:
             resp = requests.post(upstream_url, json=body, timeout=120)
             resp.raise_for_status()
