@@ -178,10 +178,33 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                         if line.startswith("data:"):
                             data_lines.append(line[len("data:"):].lstrip())
                     if not data_lines:
+                        # No 'data:' lines in this part — these may be SSE comments
+                        # (e.g., ': heartbeat') or other control lines. For SSE
+                        # clients we forward raw; for NDJSON clients we skip
+                        # comment-only parts to avoid sending ':' prefixed text
+                        # which many NDJSON parsers will not accept as JSON.
                         if is_tool_call:
-                            tool_call_buffer.append(event_raw)
+                            # Store raw form but adapt for ndjson if requested
+                            if output_mode == "sse":
+                                tool_call_buffer.append(event_raw)
+                            else:
+                                # convert comment lines to benign JSON heartbeat entries
+                                lines = [l for l in part.splitlines() if l.strip()]
+                                for ln in lines:
+                                    if ln.startswith(":"):
+                                        tool_call_buffer.append(json.dumps({"type": "heartbeat", "comment": ln[1:].strip()}) + "\n")
+                                    # ignore other control lines for NDJSON
                         else:
-                            yield event_raw
+                            if output_mode == "sse":
+                                yield event_raw
+                            else:
+                                # For NDJSON clients, convert comment-only parts
+                                # to JSON heartbeat lines, or skip if nothing useful.
+                                lines = [l for l in part.splitlines() if l.strip()]
+                                for ln in lines:
+                                    if ln.startswith(":"):
+                                        yield json.dumps({"type": "heartbeat", "comment": ln[1:].strip()}) + "\n"
+                                    # ignore other control lines
                         continue
 
                     event_payload = "\n".join(data_lines)
@@ -189,9 +212,16 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                     if event_payload.strip() == "[DONE]":
                         done_received = True
                         if is_tool_call:
-                            tool_call_buffer.append("data: [DONE]\n\n")
+                            # Append a done sentinel in the requested output mode
+                            if output_mode == "sse":
+                                tool_call_buffer.append("data: [DONE]\n\n")
+                            else:
+                                tool_call_buffer.append(json.dumps({"done": True}) + "\n")
                         else:
-                            yield "data: [DONE]\n\n"
+                            if output_mode == "sse":
+                                yield "data: [DONE]\n\n"
+                            else:
+                                yield json.dumps({"done": True}) + "\n"
                         continue
 
                     if ("tool_call" in event_payload) or ("tool_calls" in event_payload):
