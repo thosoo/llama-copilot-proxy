@@ -127,7 +127,12 @@ def process_queued_show_requests():
 
 
 
-def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode: str = "sse"):
+def _stream_chat_completion(
+    upstream_url: str,
+    body: Dict[str, Any],
+    output_mode: str = "sse",
+    ndjson_schema: str = "openai",
+):
     """Stream chat completions from upstream, injecting reasoning_content
     into visible content when THINKING_MODE == 'show_reasoning'. This
     reassembles SSE chunks, parses JSON payloads, and forwards events as
@@ -160,14 +165,11 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
         seen_reasoning = False
         pre_reasoning_content_buffer = ""
 
-        # Initial heartbeats (only emitted when this generator is used,
-        # which happens for client-requested streaming paths)
+        # Initial heartbeats: for SSE only. For NDJSON (especially Ollama schema),
+        # do not emit non-message control lines to avoid client cast errors.
         if output_mode == "sse":
             yield ": heartbeat\n\n"
             yield ": processing-prompt\n\n"
-        else:
-            yield json.dumps({"type": "heartbeat"}) + "\n"
-            yield json.dumps({"type": "processing-prompt"}) + "\n"
 
         if is_streaming:
             buffer = ""
@@ -193,30 +195,33 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                     if not data_lines:
                         # No 'data:' lines in this part — these may be SSE comments
                         # (e.g., ': heartbeat') or other control lines. For SSE
-                        # clients we forward raw; for NDJSON clients we skip
-                        # comment-only parts to avoid sending ':' prefixed text
-                        # which many NDJSON parsers will not accept as JSON.
+                        # clients we forward raw. For NDJSON clients:
+                        #  - If ndjson_schema == 'ollama', skip comment-only parts entirely
+                        #    to avoid emitting non-message rows that break strict parsers.
+                        #  - Otherwise, convert comments to benign heartbeat JSON entries.
                         if is_tool_call:
                             # Store raw form but adapt for ndjson if requested
                             if output_mode == "sse":
                                 tool_call_buffer.append(event_raw)
                             else:
-                                # convert comment lines to benign JSON heartbeat entries
-                                lines = [l for l in part.splitlines() if l.strip()]
-                                for ln in lines:
-                                    if ln.startswith(":"):
-                                        tool_call_buffer.append(json.dumps({"type": "heartbeat", "comment": ln[1:].strip()}) + "\n")
+                                if ndjson_schema != "ollama":
+                                    # convert comment lines to benign JSON heartbeat entries
+                                    lines = [l for l in part.splitlines() if l.strip()]
+                                    for ln in lines:
+                                        if ln.startswith(":"):
+                                            tool_call_buffer.append(json.dumps({"type": "heartbeat", "comment": ln[1:].strip()}) + "\n")
                                     # ignore other control lines for NDJSON
                         else:
                             if output_mode == "sse":
                                 yield event_raw
                             else:
-                                # For NDJSON clients, convert comment-only parts
-                                # to JSON heartbeat lines, or skip if nothing useful.
-                                lines = [l for l in part.splitlines() if l.strip()]
-                                for ln in lines:
-                                    if ln.startswith(":"):
-                                        yield json.dumps({"type": "heartbeat", "comment": ln[1:].strip()}) + "\n"
+                                if ndjson_schema != "ollama":
+                                    # For NDJSON clients (OpenAI-style), convert comment-only parts
+                                    # to JSON heartbeat lines.
+                                    lines = [l for l in part.splitlines() if l.strip()]
+                                    for ln in lines:
+                                        if ln.startswith(":"):
+                                            yield json.dumps({"type": "heartbeat", "comment": ln[1:].strip()}) + "\n"
                                     # ignore other control lines
                         continue
 
@@ -229,12 +234,18 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                             if output_mode == "sse":
                                 tool_call_buffer.append("data: [DONE]\n\n")
                             else:
-                                tool_call_buffer.append(json.dumps({"done": True}) + "\n")
+                                if ndjson_schema == "ollama":
+                                    tool_call_buffer.append(json.dumps({"model": body.get("model"), "done": True}) + "\n")
+                                else:
+                                    tool_call_buffer.append(json.dumps({"done": True}) + "\n")
                         else:
                             if output_mode == "sse":
                                 yield "data: [DONE]\n\n"
                             else:
-                                yield json.dumps({"done": True}) + "\n"
+                                if ndjson_schema == "ollama":
+                                    yield json.dumps({"model": body.get("model"), "done": True}) + "\n"
+                                else:
+                                    yield json.dumps({"done": True}) + "\n"
                         continue
 
                     if ("tool_call" in event_payload) or ("tool_calls" in event_payload):
@@ -375,12 +386,48 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                         else:
                             yield out_event
                     else:
-                        # NDJSON line
-                        line = out_payload + "\n"
-                        if is_tool_call:
-                            tool_call_buffer.append(line)
+                        # NDJSON output; optionally map to Ollama-like schema for /api/chat consumers
+                        if ndjson_schema == "ollama":
+                            try:
+                                # Extract assistant content from OpenAI-style chunk
+                                content_fragments: List[str] = []
+                                if isinstance(obj, dict) and isinstance(obj.get("choices"), list):
+                                    for ch in obj["choices"]:
+                                        if isinstance(ch, dict):
+                                            d = ch.get("delta") or {}
+                                            if isinstance(d, dict):
+                                                frag = d.get("content")
+                                                if isinstance(frag, str) and frag:
+                                                    content_fragments.append(frag)
+                                            # Some upstreams may use message{} in non-stream events; handle defensively
+                                            m = ch.get("message") or {}
+                                            if not content_fragments and isinstance(m, dict):
+                                                frag2 = m.get("content")
+                                                if isinstance(frag2, str) and frag2:
+                                                    content_fragments.append(frag2)
+                                content_text = "".join(content_fragments)
+                                if content_text:
+                                    out_line = json.dumps({
+                                        "model": body.get("model"),
+                                        "created_at": datetime.now(timezone.utc).isoformat(),
+                                        "message": {"role": "assistant", "content": content_text},
+                                        "done": False,
+                                    }) + "\n"
+                                    if is_tool_call:
+                                        tool_call_buffer.append(out_line)
+                                    else:
+                                        yield out_line
+                                # If no content, skip emitting a line to avoid null-cast errors downstream
+                            except Exception:
+                                # As a fallback, skip emitting malformed chunks in Ollama NDJSON mode
+                                pass
                         else:
-                            yield line
+                            # OpenAI-style NDJSON line (object-per-line)
+                            line = out_payload + "\n"
+                            if is_tool_call:
+                                tool_call_buffer.append(line)
+                            else:
+                                yield line
 
             if tool_call_detected:
                 yield "".join(tool_call_buffer)
@@ -395,14 +442,26 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                     if output_mode == "sse":
                         yield f"data: {json.dumps(flush_obj)}\n\n"
                     else:
-                        yield json.dumps(flush_obj) + "\n"
+                        if ndjson_schema == "ollama":
+                            # Map buffered content to Ollama chunk
+                            yield json.dumps({
+                                "model": body.get("model"),
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "message": {"role": "assistant", "content": pre_reasoning_content_buffer},
+                                "done": False,
+                            }) + "\n"
+                        else:
+                            yield json.dumps(flush_obj) + "\n"
                 except Exception:
                     pass
             if not done_received:
                 if output_mode == "sse":
                     yield "data: [DONE]\n\n"
                 else:
-                    yield json.dumps({"done": True}) + "\n"
+                    if ndjson_schema == "ollama":
+                        yield json.dumps({"model": body.get("model"), "done": True}) + "\n"
+                    else:
+                        yield json.dumps({"done": True}) + "\n"
         else:
             raw = r.content
             try:
@@ -433,11 +492,29 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
             # Emit a single, well-formed payload depending on requested output_mode.
             try:
                 if output_mode == "ndjson":
-                    if not isinstance(data, dict):
-                        out = {"value": data}
+                    if ndjson_schema == "ollama":
+                        # Convert a full, non-streaming response to a single Ollama-like message followed by done
+                        content_text = ""
+                        if isinstance(data, dict) and isinstance(data.get("choices"), list):
+                            for ch in data["choices"]:
+                                if isinstance(ch, dict) and isinstance(ch.get("message"), dict):
+                                    frag = ch["message"].get("content")
+                                    if isinstance(frag, str) and frag:
+                                        content_text += frag
+                        if content_text:
+                            yield json.dumps({
+                                "model": body.get("model"),
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                "message": {"role": "assistant", "content": content_text},
+                                "done": False,
+                            }) + "\n"
+                        yield json.dumps({"model": body.get("model"), "done": True}) + "\n"
                     else:
-                        out = data
-                    yield json.dumps(out) + "\n"
+                        if not isinstance(data, dict):
+                            out = {"value": data}
+                        else:
+                            out = data
+                        yield json.dumps(out) + "\n"
                 else:
                     # SSE-like: send as a single data: event (no NDJSON wrapping)
                     yield f"data: {json.dumps(data)}\n\n"
@@ -572,7 +649,8 @@ def api_chat_compat():
             output_mode = _select_output_mode(accept)
             if THINKING_DEBUG or VERBOSE:
                 print(f"🔧 [STREAM] /api/chat selected output_mode={output_mode!r} Accept={accept!r} UA={ua!r} stream={body.get('stream')!r}")
-            generator = _stream_chat_completion(upstream_url, body, output_mode=output_mode)
+            ndjson_schema = "ollama" if output_mode == "ndjson" else "openai"
+            generator = _stream_chat_completion(upstream_url, body, output_mode=output_mode, ndjson_schema=ndjson_schema)
 
             def _cleanup_generator(gen):
                 try:
@@ -857,7 +935,8 @@ def chat_completions():
             output_mode = _select_output_mode(accept)
             if THINKING_DEBUG or VERBOSE:
                 print(f"🔧 [STREAM] {request.path} selected output_mode={output_mode!r} Accept={accept!r} UA={ua!r} stream={body.get('stream')!r}")
-            generator = _stream_chat_completion(upstream_url, body, output_mode=output_mode)
+            ndjson_schema = "openai"  # keep OpenAI shape for /v1 paths
+            generator = _stream_chat_completion(upstream_url, body, output_mode=output_mode, ndjson_schema=ndjson_schema)
 
             def _cleanup_generator(gen):
                 try:
