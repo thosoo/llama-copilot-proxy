@@ -126,11 +126,13 @@ def _friendly_model_name(mid: str) -> str:
 def _register_model_alias(alias: str, real_id: str):
     if not alias or not real_id:
         return
-    key = alias
+    import os
+    # Always use just the filename for alias key
+    key = os.path.basename(alias)
     idx = 2
     # Ensure uniqueness if multiple models collapse to the same alias
     while key in MODEL_ALIASES and MODEL_ALIASES.get(key) != real_id:
-        key = f"{alias} ({idx})"
+        key = f"{os.path.basename(alias)} ({idx})"
         idx += 1
     MODEL_ALIASES[key] = real_id
     if VERBOSE:
@@ -140,7 +142,10 @@ def _register_model_alias(alias: str, real_id: str):
 def _resolve_model_id(maybe_alias: Optional[str]) -> Optional[str]:
     if not maybe_alias:
         return maybe_alias
-    return MODEL_ALIASES.get(maybe_alias, maybe_alias)
+    import os
+    # Always use just the filename for lookup
+    key = os.path.basename(maybe_alias)
+    return MODEL_ALIASES.get(key, maybe_alias)
 
 
 def _select_output_mode(accept_header: Optional[str]) -> str:
@@ -304,7 +309,10 @@ def _prepare_chat_body_and_log(body: Dict[str, Any]) -> Dict[str, Any]:
 def api_show():
     # Show model information; map to /v1/models/{model} when Ollama endpoint is unavailable
     body = request.get_json(silent=True) or {}
+    import os
     model = _resolve_model_id(body.get("model"))
+    # Always use just the filename for model
+    model = os.path.basename(model) if isinstance(model, str) else model
     if not isinstance(model, str) or not model:
         return jsonify({"error": "bad_request", "message": "Missing 'model' in body"}), 400
     # Try llama.cpp OpenAI-compatible endpoint
