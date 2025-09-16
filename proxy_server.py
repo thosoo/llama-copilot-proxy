@@ -10,10 +10,16 @@ def api_tags():
         r.raise_for_status()
         obj = r.json()
         import os
+        def strip_model_name(val):
+            base = os.path.basename(val)
+            if base.endswith('.gguf'):
+                base = base[:-5]
+            return base
+
         def basename_fields(d):
             for k in ["name", "model", "id"]:
                 if k in d and isinstance(d[k], str):
-                    d[k] = os.path.basename(d[k])
+                    d[k] = strip_model_name(d[k])
             return d
         # Patch top-level models list
         if "models" in obj and isinstance(obj["models"], list):
@@ -523,11 +529,18 @@ def fallback_proxy(path: str):
 
         # Normalize for any path ending with /v1/models
         import os
+        def strip_model_name(val):
+            # Remove path and .gguf extension
+            base = os.path.basename(val)
+            if base.endswith('.gguf'):
+                base = base[:-5]
+            return base
+
         def recursive_basename(obj):
             if isinstance(obj, dict):
                 for k, v in obj.items():
                     if k in ("name", "model", "id") and isinstance(v, str):
-                        obj[k] = os.path.basename(v)
+                        obj[k] = strip_model_name(v)
                     else:
                         obj[k] = recursive_basename(v)
                 return obj
@@ -536,8 +549,9 @@ def fallback_proxy(path: str):
             else:
                 return obj
 
-        norm_path = path.lstrip("/")
-        if norm_path.endswith("v1/models") and resp.status_code == 200:
+    # Robust path normalization for /v1/models (handles trailing slash and query)
+    norm_path = path.lstrip("/").split("?")[0].rstrip("/")
+    if norm_path == "v1/models" and resp.status_code == 200:
             try:
                 obj = resp.json()
                 obj = recursive_basename(obj)
