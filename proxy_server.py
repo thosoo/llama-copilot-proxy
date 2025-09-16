@@ -1,3 +1,39 @@
+# Add /api/tags endpoint to normalize model names/ids
+@app.route("/api/tags", methods=["GET"])
+def api_tags():
+    # Fetch models from upstream /v1/models
+    try:
+        upstream_url = f"{UPSTREAM}/v1/models"
+        if VERBOSE:
+            print(f"🔎 [/api/tags] Fetching upstream models from {upstream_url} ...")
+        r = requests.get(upstream_url, timeout=15)
+        r.raise_for_status()
+        obj = r.json()
+        import os
+        def basename_fields(d):
+            for k in ["name", "model", "id"]:
+                if k in d and isinstance(d[k], str):
+                    d[k] = os.path.basename(d[k])
+            return d
+        # Patch top-level models list
+        if "models" in obj and isinstance(obj["models"], list):
+            obj["models"] = [basename_fields(dict(m)) for m in obj["models"]]
+        # Patch top-level data list
+        if "data" in obj and isinstance(obj["data"], list):
+            obj["data"] = [basename_fields(dict(m)) for m in obj["data"]]
+        # Patch top-level name/model/id
+        obj = basename_fields(obj)
+        # Inject capabilities if missing
+        for m in obj.get("models", []):
+            if "capabilities" not in m:
+                m["capabilities"] = ["completion", "chat", "embeddings", "tools", "planAndExecute"]
+        if VERBOSE:
+            print(f"🔎 [/api/tags] Normalized models (models={len(obj.get('models',[]))}) with aliases; capabilities injected")
+        return jsonify(obj)
+    except Exception as e:
+        if VERBOSE:
+            print(f"[GET] /api/tags upstream error: {e}")
+        return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
 import os
 import json
 import time
