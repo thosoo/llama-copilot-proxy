@@ -521,8 +521,9 @@ def fallback_proxy(path: str):
             timeout=60,
         )
 
-        # Patch /v1/models response to rewrite model names/ids to just the filename
-        if path == "v1/models" and resp.status_code == 200:
+        # Normalize path for /v1/models
+        norm_path = path.lstrip("/")
+        if norm_path == "v1/models" and resp.status_code == 200:
             try:
                 import os
                 obj = resp.json()
