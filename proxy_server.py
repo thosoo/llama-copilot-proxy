@@ -477,6 +477,31 @@ def fallback_proxy(path: str):
             timeout=60,
         )
 
+        # Patch /v1/models response to rewrite model names/ids to just the filename
+        if path == "v1/models" and resp.status_code == 200:
+            try:
+                import os
+                obj = resp.json()
+                def basename_fields(d):
+                    for k in ["name", "model", "id"]:
+                        if k in d and isinstance(d[k], str):
+                            d[k] = os.path.basename(d[k])
+                    return d
+                # Patch top-level models list
+                if "models" in obj and isinstance(obj["models"], list):
+                    obj["models"] = [basename_fields(dict(m)) for m in obj["models"]]
+                # Patch top-level data list
+                if "data" in obj and isinstance(obj["data"], list):
+                    obj["data"] = [basename_fields(dict(m)) for m in obj["data"]]
+                # Patch top-level name/model/id
+                obj = basename_fields(obj)
+                return Response(json.dumps(obj), status=resp.status_code, mimetype="application/json")
+            except Exception as e:
+                if VERBOSE:
+                    print("🚨 PATCH /v1/models error:", e)
+                # fallback to original response
+                pass
+
         def generate():
             for chunk in resp.iter_content(chunk_size=8192):
                 if chunk:
