@@ -549,9 +549,9 @@ def fallback_proxy(path: str):
             else:
                 return obj
 
-    # Robust path normalization for /v1/models (handles trailing slash and query)
-    norm_path = path.lstrip("/").split("?")[0].rstrip("/")
-    if norm_path == "v1/models" and resp.status_code == 200:
+        # Robust path normalization for /v1/models (handles trailing slash and query)
+        norm_path = path.lstrip("/").split("?")[0].rstrip("/")
+        if norm_path == "v1/models" and resp.status_code == 200:
             try:
                 obj = resp.json()
                 obj = recursive_basename(obj)
