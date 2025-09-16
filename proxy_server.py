@@ -127,9 +127,7 @@ def process_queued_show_requests():
 
 
 
-def _stream_chat_completion(
-                    # STRICT PATCH: Only yield events with non-empty content, always set role to 'assistant'
-                    try:
+def _stream_chat_completion(upstream_url, body, output_mode, ndjson_schema):
                         choices = obj.get("choices") if isinstance(obj, dict) else None
                         if isinstance(choices, list) and len(choices) > 0:
                             delta = choices[0].get("delta")
@@ -138,200 +136,6 @@ def _stream_chat_completion(
                                 # Only emit if content is a non-empty string
                                 if isinstance(content, str) and content.strip():
                                     delta["role"] = "assistant"
-                                    out_payload = json.dumps(obj)
-                                    if output_mode == "sse":
-                                        out_event = f"data: {out_payload}\n\n"
-                                        if is_tool_call:
-                                            tool_call_buffer.append(out_event)
-                                        else:
-                                            yield out_event
-                                    else:
-                                        line = out_payload + "\n"
-                                        if is_tool_call:
-                                            tool_call_buffer.append(line)
-                                        else:
-                                            yield line
-                                # else: skip empty content chunks
-                            # else: skip if delta is not dict
-                        # else: skip if choices is not valid
-                        # PATCH: skip all other events (do not yield)
-                    except Exception:
-                        pass
-                        try:
-                            choices = obj.get("choices") if isinstance(obj, dict) else None
-                            if isinstance(choices, list) and len(choices) > 0:
-                                SEP = "\n\n---\n\n"
-                                # Snapshot whether each choice.delta had upstream 'content' BEFORE modifications
-                                had_original_delta_content = []
-                                for choice in choices:
-                                    if isinstance(choice, dict) and isinstance(choice.get("delta"), dict):
-                                        up_cont = choice["delta"].get("content")
-                                        had_original_delta_content.append(isinstance(up_cont, str) and len(up_cont) > 0)
-                                    else:
-                                        had_original_delta_content.append(False)
-                                for choice in choices:
-                                    if not isinstance(choice, dict):
-                                        continue
-
-                                    if choice.get("message") and isinstance(choice.get("message"), dict):
-                                        msg = choice["message"]
-                                        if isinstance(msg.get("reasoning_content"), str):
-                                            rc = msg.pop("reasoning_content")
-                                            rc = rc.replace("\r\n", "\n")
-                                            original = msg.get("content") or ""
-                                            seen_reasoning = True
-                                            if pre_reasoning_content_buffer or original:
-                                                # If we buffered content before reasoning or have original alongside, flush buffer after HR
-                                                combined = "💭 " + rc + SEP + (pre_reasoning_content_buffer if pre_reasoning_content_buffer else "")
-                                                if original:
-                                                    combined += original
-                                                msg["content"] = combined
-                                                pre_reasoning_content_buffer = ""
-                                                reasoning_pending_separator = False
-                                            else:
-                                                # Emit reasoning now, and mark that the next normal content
-                                                # should be prefixed with a visible separator.
-                                                msg["content"] = "💭 " + rc
-                                                reasoning_pending_separator = True
-
-                                    if choice.get("delta") and isinstance(choice.get("delta"), dict):
-                                        d = choice["delta"]
-                                        if isinstance(d.get("reasoning_content"), str):
-                                            rc = d.pop("reasoning_content")
-                                            rc = rc.replace("\r\n", "\n")
-                                            original = d.get("content") or ""
-                                            seen_reasoning = True
-                                            if not reasoning_prefix_emitted:
-                                                if pre_reasoning_content_buffer or original:
-                                                    # Flush any buffered pre-reasoning content, plus any original content, after HR
-                                                    combined_tail = (pre_reasoning_content_buffer if pre_reasoning_content_buffer else "")
-                                                    if original:
-                                                        combined_tail += original
-                                                    d["content"] = "💭 " + rc + SEP + combined_tail
-                                                    pre_reasoning_content_buffer = ""
-                                                    reasoning_pending_separator = False
-                                                else:
-                                                    # Start reasoning block; next normal content gets prefixed with SEP.
-                                                    d["content"] = "💭 " + rc
-                                                    reasoning_pending_separator = True
-                                                reasoning_prefix_emitted = True
-                                            else:
-                                                if original:
-                                                    d["content"] = _join_with_space(rc, original)
-                                                else:
-                                                    d["content"] = rc
-                                        else:
-                                            # No reasoning in this delta; if we haven't seen reasoning yet, buffer content
-                                            cont_piece = d.get("content")
-                                            if isinstance(cont_piece, str) and cont_piece and not seen_reasoning:
-                                                pre_reasoning_content_buffer += cont_piece
-                                                # Remove content from this event so we can emit it later in order
-                                                d["content"] = ""
-
-                                if reasoning_pending_separator and isinstance(obj, dict):
-                                    try:
-                                        for idx, ch in enumerate(obj.get("choices", [])):
-                                            if not isinstance(ch, dict):
-                                                continue
-                                            for chunk in r.iter_content(chunk_size=1024):
-                                                if not chunk:
-                                                    continue
-                                                s = chunk.decode("utf-8", errors="ignore")
-                                                buffer += s
-
-                                                parts = buffer.split("\n\n")
-                                                buffer = parts.pop() if parts else ""
-
-                                                for part in parts:
-                                                    if not part.strip():
-                                                        continue
-
-                                                    data_lines: List[str] = []
-                                                    for line in part.splitlines():
-                                                        if line.startswith("data:"):
-                                                            data_lines.append(line[len("data:"):].lstrip())
-                                                    if not data_lines:
-                                                        continue
-
-                                                    event_payload = "\n".join(data_lines)
-
-                                                    # Only process if event_payload is valid JSON and has non-empty content
-                                                    try:
-                                                        obj = json.loads(event_payload)
-                                                        choices = obj.get("choices") if isinstance(obj, dict) else None
-                                                        if isinstance(choices, list) and len(choices) > 0:
-                                                            delta = choices[0].get("delta")
-                                                            if isinstance(delta, dict):
-                                                                content = delta.get("content")
-                                                                if isinstance(content, str) and content.strip():
-                                                                    delta["role"] = "assistant"
-                                                                    out_payload = json.dumps(obj)
-                                                                    if output_mode == "sse":
-                                                                        out_event = f"data: {out_payload}\n\n"
-                                                                        if is_tool_call:
-                                                                            tool_call_buffer.append(out_event)
-                                                                        else:
-                                                                            yield out_event
-                                                                    else:
-                                                                        line = out_payload + "\n"
-                                                                        if is_tool_call:
-                                                                            tool_call_buffer.append(line)
-                                                                        else:
-                                                                            yield line
-                                                                # else: skip empty content chunks
-                                                            # else: skip if delta is not dict
-                                                        # else: skip if choices is not valid
-                                                    except Exception:
-                                                        continue
-                                if isinstance(ch, dict) and isinstance(ch.get("message"), dict):
-                                    frag = ch["message"].get("content")
-                                    if isinstance(frag, str) and frag:
-                                        content_text += frag
-                        if content_text:
-                            yield json.dumps({
-                                "model": body.get("model"),
-                                "created_at": datetime.now(timezone.utc).isoformat(),
-                                "message": {"role": "assistant", "content": content_text},
-                                "done": False,
-                            }) + "\n"
-                        yield json.dumps({"model": body.get("model"), "done": True}) + "\n"
-                    else:
-                        if not isinstance(data, dict):
-                            out = {"value": data}
-                        else:
-                            out = data
-                        yield json.dumps(out) + "\n"
-                else:
-                    # SSE-like: send as a single data: event (no NDJSON wrapping)
-                    yield f"data: {json.dumps(data)}\n\n"
-            except Exception:
-                # Fallback: emit raw JSON string
-                try:
-                    yield json.dumps(data) + ("\n" if output_mode == "ndjson" else "\n\n")
-                except Exception:
-                    # As a last resort emit a null placeholder
-                    if output_mode == "ndjson":
-                        yield json.dumps({"value": None}) + "\n"
-                    else:
-                        yield "data: null\n\n"
-
-
-def _client_wants_stream(body: Dict[str, Any]) -> bool:
-    """Interpret various client-provided stream flags strictly.
-
-    Return True only for explicit true-like values (True, 'true', '1', 1, 'yes').
-    Treat 'false' or any non-true-like value as False.
-    """
-    if body is None:
-        return False
-    s = body.get("stream")
-    if isinstance(s, bool):
-        return s
-    if isinstance(s, (int, float)):
-        return bool(s)
-    if isinstance(s, str):
-        return s.strip().lower() in ("1", "true", "yes")
-    return False
 
 
 def _increment_streams():
@@ -370,218 +174,94 @@ def _prepare_chat_body_and_log(body: Dict[str, Any]) -> Dict[str, Any]:
         print(f"🔧 [TOOLS] Tool request detected with {len(body['tools'])} tools")
         vlog("[POST] Full tool-calling request body:", json.dumps(body, indent=2))
         if THINKING_DEBUG:
-            print("🔧 [TOOLS] Original tools:", json.dumps(body["tools"], indent=2))
-        body["tools"] = patch_tools_array(body["tools"]) 
-        if THINKING_DEBUG:
-            print("🔧 [TOOLS] Patched tools:", json.dumps(body["tools"], indent=2))
-    if VERBOSE:
-        print("📤 [PAYLOAD] Full request payload:", json.dumps(body, indent=2))
-    return body
-
-
-# --- Lightweight request/response logging (enable with VERBOSE=1) ---
-@app.before_request
-def _dbg_before_request():
-    if VERBOSE:
-        g.__dict__["_start_ts"] = time.time()
-        ua = request.headers.get("user-agent", "-")
-        print(f"➡️  [REQ] {request.method} {request.path} UA={ua}")
-
-
-@app.after_request
-def _dbg_after_request(resp):
-    if VERBOSE:
-        try:
-            start = g.__dict__.get("_start_ts")
-            dur_ms = int((time.time() - start) * 1000) if start else -1
-        except Exception:
-            dur_ms = -1
-        print(f"⬅️  [RESP] {request.method} {request.path} -> {resp.status_code} in {dur_ms}ms")
-    return resp
-
-
-# --- Ollama compatibility endpoints expected by Copilot ---
-
-@app.route("/api/version", methods=["GET", "HEAD"])  # HEAD used by some clients
-def api_version():
-    # Return a simple OK + version so Copilot detects the provider
-    # Keep shape compatible with Ollama's /api/version
-    if VERBOSE:
-        print("🔎 [/api/version] responding with status ok and version:", VERSION)
-    return jsonify({"status": "ok", "version": VERSION or "0.0.0"})
-
-
-@app.post("/api/chat")
-def api_chat_compat():
-    # Map Ollama-style /api/chat to OpenAI /v1/chat/completions with thinking support
-    print(f"[POST] Proxying Copilot /api/chat -> /v1/chat/completions")
-    if VERBOSE:
-        print("[POST] Headers:", dict(request.headers))
-    body = request.get_json(silent=True) or {}
-    if isinstance(body.get("model"), str):
-        original = body["model"]
-        body["model"] = _resolve_model_id(original)
-        if VERBOSE and body["model"] != original:
-            print(f"🔁 [/api/chat] Resolved model alias '{original}' -> '{body['model']}'")
-    body = _prepare_chat_body_and_log(body)
-
-    upstream_url = f"{UPSTREAM}/v1/chat/completions"
-    # If client requested streaming, use SSE generator path; otherwise proxy as JSON
-    if _client_wants_stream(body):
-        _increment_streams()
-        try:
-            accept = request.headers.get("Accept", "")
-            ua = request.headers.get("User-Agent", "")
-            output_mode = _select_output_mode(accept)
-            if THINKING_DEBUG or VERBOSE:
-                print(f"🔧 [STREAM] /api/chat selected output_mode={output_mode!r} Accept={accept!r} UA={ua!r} stream={body.get('stream')!r}")
-            ndjson_schema = "ollama" if output_mode == "ndjson" else "openai"
-            generator = _stream_chat_completion(upstream_url, body, output_mode=output_mode, ndjson_schema=ndjson_schema)
-
-            def _cleanup_generator(gen):
+            def _stream_chat_completion(upstream_url, body, output_mode, ndjson_schema):
+                """
+                Streams the upstream response, parses events, and yields only valid Copilot-compatible events.
+                """
+                import requests
+                import json
+                from datetime import datetime, timezone
+                if VERBOSE:
+                    print(f"[STREAM] Proxying to {upstream_url} with output_mode={output_mode}")
                 try:
-                    for x in gen:
-                        yield x
-                finally:
-                    _decrement_streams("stream end")
-
-            mimetype = "application/x-ndjson" if output_mode == "ndjson" else "text/event-stream"
-            resp = Response(stream_with_context(_cleanup_generator(generator)), mimetype=mimetype)
-            # Advise caches that representation varies by Accept
-            resp.headers["Vary"] = "Accept"
-            # SSE-specific headers
-            if output_mode == "sse":
-                resp.headers["Cache-Control"] = "no-cache"
-                resp.headers["X-Accel-Buffering"] = "no"
-                resp.headers["Connection"] = "keep-alive"
-            return resp
-        except Exception as e:
-            _decrement_streams("upstream error")
-            print(f"[POST] Upstream request error for /api/chat:", e)
-            return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
-    else:
-        # Non-streaming: simply forward as JSON and return application/json without heartbeat lines
-        if THINKING_DEBUG or VERBOSE:
-            print(f"🔧 [STREAM] /api/chat non-streaming path (stream={body.get('stream')!r}) Accept={request.headers.get('Accept','')!r}")
-        try:
-            resp = requests.post(upstream_url, json=body, timeout=120)
-            resp.raise_for_status()
-            try:
-                data = resp.json()
-                return Response(json.dumps(data), status=resp.status_code, mimetype="application/json")
-            except Exception:
-                # If upstream returned non-JSON, return raw text
-                return Response(resp.content, status=resp.status_code, mimetype="application/json")
-        except Exception as e:
-            print(f"[POST] Upstream request error for /api/chat:", e)
-            return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
-
-
-def _oai_models_to_ollama_tags(oai_models: Dict[str, Any]) -> Dict[str, Any]:
-    """Adapt OpenAI-style /v1/models list to Ollama /api/tags shape minimally."""
-    models_in = []
-    if isinstance(oai_models, dict) and isinstance(oai_models.get("data"), list):
-        models_in = oai_models["data"]
-    out = {"models": []}
-    def _add_caps(entry: Dict[str, Any]) -> Dict[str, Any]:
-        caps = set(entry.get("capabilities") or [])
-        # Expand capabilities to satisfy Copilot Ask/Agent checks
-        caps.update(["completion", "chat", "embeddings", "tools", "planAndExecute"])  # help Copilot feature detection
-        entry["capabilities"] = sorted(caps)
-        return entry
-    for m in models_in:
-        mid = m.get("id") if isinstance(m, dict) else None
-        created = m.get("created") if isinstance(m, dict) else None
-        try:
-            # created is seconds-epoch in OAI; convert to ISO8601 if present
-            modified_at = (
-                datetime.fromtimestamp(created, tz=timezone.utc).isoformat()
-                if isinstance(created, (int, float)) else datetime.now(timezone.utc).isoformat()
-            )
-        except Exception:
-            modified_at = datetime.now(timezone.utc).isoformat()
-        alias = _friendly_model_name(mid or "unknown")
-        _register_model_alias(alias, mid or "unknown")
-        entry = {
-            "name": alias,
-            "model": mid or "unknown",
-            "modified_at": modified_at,
-            "size": 0,
-            "digest": "",
-            "details": {
-                "parent_model": "",
-                "format": "gguf",
-                "family": "",
-                "families": [],
-                "parameter_size": "",
-                "quantization_level": ""
-            }
-        }
-        out["models"].append(_add_caps(entry))
-    return out
-
-
-@app.get("/api/tags")
-def api_tags():
-    # List local models; if upstream is llama.cpp (OpenAI), adapt /v1/models
-    try:
-        if VERBOSE:
-            print(f"🔎 [/api/tags] Fetching upstream models from {UPSTREAM}/v1/models ...")
-        r = requests.get(f"{UPSTREAM}/v1/models", timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        # Normalize into Ollama tags shape with friendly aliases and consistent capabilities
-        MODEL_ALIASES.clear()
-        models_out: List[Dict[str, Any]] = []
-        if isinstance(data, dict) and isinstance(data.get("models"), list):
-            src_models = data["models"]
-            for e in src_models:
-                if not isinstance(e, dict):
-                    continue
-                mid = e.get("id") or e.get("model") or e.get("name")
-                if not isinstance(mid, str):
-                    continue
-                alias = _friendly_model_name(mid)
-                _register_model_alias(alias, mid)
-                modified_at = e.get("modified_at") or e.get("created")
-                try:
-                    if isinstance(modified_at, (int, float)):
-                        modified_at = datetime.fromtimestamp(modified_at, tz=timezone.utc).isoformat()
-                    elif not isinstance(modified_at, str):
-                        modified_at = datetime.now(timezone.utc).isoformat()
-                except Exception:
-                    modified_at = datetime.now(timezone.utc).isoformat()
-                details = e.get("details") or {}
-                entry = {
-                    "name": alias,
-                    "model": mid,
-                    "modified_at": modified_at,
-                    "size": e.get("size", 0),
-                    "digest": e.get("digest", ""),
-                    "details": {
-                        "parent_model": details.get("parent_model", ""),
-                        "format": details.get("format", "gguf"),
-                        "family": details.get("family", ""),
-                        "families": details.get("families", []),
-                        "parameter_size": details.get("parameter_size", ""),
-                        "quantization_level": details.get("quantization_level", ""),
-                    },
-                }
-                caps = set(e.get("capabilities") or [])
-                caps.update(["completion", "chat", "embeddings", "tools", "planAndExecute"])  # inject
-                entry["capabilities"] = sorted(caps)
-                models_out.append(entry)
-        else:
-            adapted = _oai_models_to_ollama_tags(data)
-            models_out = adapted.get("models", [])
-        count = len(models_out)
-        if VERBOSE:
-            print(f"🔎 [/api/tags] Normalized models (models={count}) with aliases; capabilities injected")
-        return jsonify({"models": models_out})
-    except Exception as e:
-        if VERBOSE:
-            print("[GET] /api/tags upstream error:", e)
-        return jsonify({"models": []}), 200
+                    r = requests.post(upstream_url, json=body, stream=True, timeout=120)
+                    r.raise_for_status()
+                    buffer = ""
+                    for chunk in r.iter_content(chunk_size=1024):
+                        if not chunk:
+                            continue
+                        s = chunk.decode("utf-8", errors="ignore")
+                        buffer += s
+                        # Split into SSE events (lines starting with 'data:') or NDJSON lines
+                        if output_mode == "sse":
+                            parts = buffer.split("\n\n")
+                            buffer = parts.pop() if parts else ""
+                            for part in parts:
+                                if not part.strip():
+                                    continue
+                                data_lines = []
+                                for line in part.splitlines():
+                                    if line.startswith("data:"):
+                                        data_lines.append(line[len("data:"):].lstrip())
+                                if not data_lines:
+                                    continue
+                                event_payload = "\n".join(data_lines)
+                                try:
+                                    obj = json.loads(event_payload)
+                                    choices = obj.get("choices") if isinstance(obj, dict) else None
+                                    if isinstance(choices, list) and len(choices) > 0:
+                                        delta = choices[0].get("delta")
+                                        if isinstance(delta, dict):
+                                            content = delta.get("content")
+                                            if isinstance(content, str) and content.strip():
+                                                delta["role"] = "assistant"
+                                                out_payload = json.dumps(obj)
+                                                out_event = f"data: {out_payload}\n\n"
+                                                if VERBOSE:
+                                                    print(f"[STREAM] Yielding event: {out_event}")
+                                                yield out_event
+                                except Exception as e:
+                                    if VERBOSE:
+                                        print(f"[STREAM] Failed to parse event: {e}")
+                                    continue
+                        else:  # NDJSON
+                            lines = buffer.split("\n")
+                            buffer = lines.pop() if lines else ""
+                            for line in lines:
+                                if not line.strip():
+                                    continue
+                                try:
+                                    obj = json.loads(line)
+                                    choices = obj.get("choices") if isinstance(obj, dict) else None
+                                    if isinstance(choices, list) and len(choices) > 0:
+                                        delta = choices[0].get("delta")
+                                        if isinstance(delta, dict):
+                                            content = delta.get("content")
+                                            if isinstance(content, str) and content.strip():
+                                                delta["role"] = "assistant"
+                                                out_payload = json.dumps(obj)
+                                                if VERBOSE:
+                                                    print(f"[STREAM] Yielding NDJSON event: {out_payload}")
+                                                yield out_payload + "\n"
+                                except Exception as e:
+                                    if VERBOSE:
+                                        print(f"[STREAM] Failed to parse NDJSON event: {e}")
+                                    continue
+                    # At the end, yield a final 'done' event
+                    done_event = {"model": body.get("model"), "done": True}
+                    if output_mode == "sse":
+                        yield f"data: {json.dumps(done_event)}\n\n"
+                    else:
+                        yield json.dumps(done_event) + "\n"
+                except Exception as e:
+                    if VERBOSE:
+                        print(f"[STREAM] Upstream error: {e}")
+                    # Yield a minimal error event
+                    err_event = {"model": body.get("model"), "error": str(e), "done": True}
+                    if output_mode == "sse":
+                        yield f"data: {json.dumps(err_event)}\n\n"
+                    else:
+                        yield json.dumps(err_event) + "\n"
 
 
 @app.post("/api/show")
