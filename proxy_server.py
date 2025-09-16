@@ -15,7 +15,7 @@ app = Flask(__name__)
 # Runtime configuration (environment-driven)
 LISTEN_PORT = int(os.environ.get("LISTEN_PORT", "11434"))
 LISTEN_HOST = os.environ.get("LISTEN_HOST", "0.0.0.0")
-UPSTREAM = os.environ.get("UPSTREAM", "http://10.66.0.7:8080")
+UPSTREAM = os.environ.get("UPSTREAM", "http://10.66.0.5:8080")
 THINKING_MODE = os.environ.get("THINKING_MODE", "default")
 THINKING_DEBUG = os.environ.get("THINKING_DEBUG", "false").lower() in ("1", "true", "yes")
 VERBOSE = os.environ.get("VERBOSE", "false").lower() in ("1", "true", "yes")
@@ -128,161 +128,35 @@ def process_queued_show_requests():
 
 
 def _stream_chat_completion(
-    upstream_url: str,
-    body: Dict[str, Any],
-    output_mode: str = "sse",
-    ndjson_schema: str = "openai",
-):
-    """Stream chat completions from upstream, injecting reasoning_content
-    into visible content when THINKING_MODE == 'show_reasoning'. This
-    reassembles SSE chunks, parses JSON payloads, and forwards events as
-    SSE to the downstream client.
-    """
-    # This generator handles streaming SSE-style responses from upstream.
-    # Heartbeat/event prefixes are only emitted when the client explicitly
-    # requested a streaming response via body.get("stream") == True.
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream, application/json",
-    }
-
-    with requests.post(upstream_url, data=json.dumps(body), headers=headers, stream=True) as r:
-        content_type = r.headers.get("content-type", "")
-        vlog(f"[POST] Upstream response status: {r.status_code}")
-        vlog(f"[POST] Upstream response headers: {dict(r.headers)}")
-        if THINKING_DEBUG:
-            print(f"🔧 [STREAM] generator start: output_mode={output_mode!r} upstream_content_type={content_type!r}")
-
-        # Determine whether upstream is sending SSE and proceed with streaming
-        is_streaming = "text/event-stream" in content_type
-
-        tool_call_buffer: List[str] = []
-        is_tool_call = False
-        tool_call_detected = False
-        done_received = False
-        reasoning_prefix_emitted = False
-        reasoning_pending_separator = False
-        seen_reasoning = False
-        pre_reasoning_content_buffer = ""
-
-        # Initial heartbeats: for SSE only. For NDJSON (especially Ollama schema),
-        # do not emit non-message control lines to avoid client cast errors.
-        if output_mode == "sse":
-            yield ": heartbeat\n\n"
-            yield ": processing-prompt\n\n"
-
-        if is_streaming:
-            buffer = ""
-            for chunk in r.iter_content(chunk_size=1024):
-                if not chunk:
-                    continue
-                s = chunk.decode("utf-8", errors="ignore")
-                buffer += s
-
-                parts = buffer.split("\n\n")
-                buffer = parts.pop() if parts else ""
-
-                for part in parts:
-                    if not part.strip():
-                        continue
-
-                    event_raw = part + "\n\n"
-
-                    data_lines: List[str] = []
-                    for line in part.splitlines():
-                        if line.startswith("data:"):
-                            data_lines.append(line[len("data:"):].lstrip())
-                    if not data_lines:
-                        # No 'data:' lines in this part — these may be SSE comments
-                        # (e.g., ': heartbeat') or other control lines. For SSE
-                        # clients we forward raw. For NDJSON clients:
-                        #  - If ndjson_schema == 'ollama', skip comment-only parts entirely
-                        #    to avoid emitting non-message rows that break strict parsers.
-                        #  - Otherwise, convert comments to benign heartbeat JSON entries.
-                        if is_tool_call:
-                            # Store raw form but adapt for ndjson if requested
-                            if output_mode == "sse":
-                                tool_call_buffer.append(event_raw)
-                            else:
-                                if ndjson_schema != "ollama":
-                                    # convert comment lines to benign JSON heartbeat entries
-                                    lines = [l for l in part.splitlines() if l.strip()]
-                                    for ln in lines:
-                                        if ln.startswith(":"):
-                                            tool_call_buffer.append(json.dumps({"type": "heartbeat", "comment": ln[1:].strip()}) + "\n")
-                                    # ignore other control lines for NDJSON
-                        else:
-                            if output_mode == "sse":
-                                yield event_raw
-                            else:
-                                if ndjson_schema != "ollama":
-                                    # For NDJSON clients (OpenAI-style), convert comment-only parts
-                                    # to JSON heartbeat lines.
-                                    lines = [l for l in part.splitlines() if l.strip()]
-                                    for ln in lines:
-                                        if ln.startswith(":"):
-                                            yield json.dumps({"type": "heartbeat", "comment": ln[1:].strip()}) + "\n"
-                                    # ignore other control lines
-                        continue
-
-                    event_payload = "\n".join(data_lines)
-
-                    if event_payload.strip() == "[DONE]":
-                        done_received = True
-                        if is_tool_call:
-                            # Append a done sentinel in the requested output mode
-                            if output_mode == "sse":
-                                tool_call_buffer.append("data: [DONE]\n\n")
-                            else:
-                                if ndjson_schema == "ollama":
-                                    tool_call_buffer.append(json.dumps({"model": body.get("model"), "done": True}) + "\n")
-                                else:
-                                    tool_call_buffer.append(json.dumps({"done": True}) + "\n")
-                        else:
-                            if output_mode == "sse":
-                                yield "data: [DONE]\n\n"
-                            else:
-                                if ndjson_schema == "ollama":
-                                    yield json.dumps({"model": body.get("model"), "done": True}) + "\n"
-                                else:
-                                    yield json.dumps({"done": True}) + "\n"
-                        continue
-
-                    if ("tool_call" in event_payload) or ("tool_calls" in event_payload):
-                        # Enter tool-call buffering mode, but don't append raw SSE.
-                        # We'll buffer the parsed JSON in the selected output format below.
-                        is_tool_call = True
-                        tool_call_detected = True
-
+                    # STRICT PATCH: Only yield events with non-empty content, always set role to 'assistant'
                     try:
-                        obj = json.loads(event_payload)
-                    except Exception:
-                        # If parsing fails, avoid emitting raw SSE to NDJSON clients.
-                        if output_mode == "ndjson":
-                            if event_payload.strip():
-                                line = json.dumps({"value": event_payload}) + "\n"
-                                if is_tool_call:
-                                    tool_call_buffer.append(line)
-                                else:
-                                    yield line
-                            # empty payload -> skip
-                        else:
-                            if is_tool_call:
-                                tool_call_buffer.append(event_raw)
-                            else:
-                                yield event_raw
-                        continue
-
-                    # Ensure NDJSON clients always receive a JSON object (map).
-                    # If upstream provided a non-dict (null, string, list), wrap it
-                    # so client-side casts to Map<String, dynamic> succeed.
-                    try:
-                        if output_mode == "ndjson" and not isinstance(obj, dict):
-                            obj = {"value": obj}
+                        choices = obj.get("choices") if isinstance(obj, dict) else None
+                        if isinstance(choices, list) and len(choices) > 0:
+                            delta = choices[0].get("delta")
+                            if isinstance(delta, dict):
+                                content = delta.get("content")
+                                # Only emit if content is a non-empty string
+                                if isinstance(content, str) and content.strip():
+                                    delta["role"] = "assistant"
+                                    out_payload = json.dumps(obj)
+                                    if output_mode == "sse":
+                                        out_event = f"data: {out_payload}\n\n"
+                                        if is_tool_call:
+                                            tool_call_buffer.append(out_event)
+                                        else:
+                                            yield out_event
+                                    else:
+                                        line = out_payload + "\n"
+                                        if is_tool_call:
+                                            tool_call_buffer.append(line)
+                                        else:
+                                            yield line
+                                # else: skip empty content chunks
+                            # else: skip if delta is not dict
+                        # else: skip if choices is not valid
+                        # PATCH: skip all other events (do not yield)
                     except Exception:
                         pass
-
-                    if THINKING_MODE == "show_reasoning":
                         try:
                             choices = obj.get("choices") if isinstance(obj, dict) else None
                             if isinstance(choices, list) and len(choices) > 0:
@@ -359,144 +233,56 @@ def _stream_chat_completion(
                                         for idx, ch in enumerate(obj.get("choices", [])):
                                             if not isinstance(ch, dict):
                                                 continue
-                                            if ch.get("delta") and isinstance(ch.get("delta"), dict):
-                                                delta_obj = ch["delta"]
-                                                cont = delta_obj.get("content")
-                                                # Only inject separator when upstream originally provided content in this delta
-                                                if had_original_delta_content[idx] and isinstance(cont, str) and cont:
-                                                    # Prefix the first visible content with a Markdown HR separator
-                                                    if not cont.startswith("\n---\n") and not cont.startswith("---\n"):
-                                                        delta_obj["content"] = SEP + cont
-                                                    reasoning_pending_separator = False
-                                                    break
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
+                                            for chunk in r.iter_content(chunk_size=1024):
+                                                if not chunk:
+                                                    continue
+                                                s = chunk.decode("utf-8", errors="ignore")
+                                                buffer += s
 
-                    try:
-                        out_payload = json.dumps(obj)
-                    except Exception:
-                        out_payload = event_payload
+                                                parts = buffer.split("\n\n")
+                                                buffer = parts.pop() if parts else ""
 
-                    if output_mode == "sse":
-                        out_event = f"data: {out_payload}\n\n"
-                        if is_tool_call:
-                            tool_call_buffer.append(out_event)
-                        else:
-                            yield out_event
-                    else:
-                        # NDJSON output; optionally map to Ollama-like schema for /api/chat consumers
-                        if ndjson_schema == "ollama":
-                            try:
-                                # Extract assistant content from OpenAI-style chunk
-                                content_fragments: List[str] = []
-                                if isinstance(obj, dict) and isinstance(obj.get("choices"), list):
-                                    for ch in obj["choices"]:
-                                        if isinstance(ch, dict):
-                                            d = ch.get("delta") or {}
-                                            if isinstance(d, dict):
-                                                frag = d.get("content")
-                                                if isinstance(frag, str) and frag:
-                                                    content_fragments.append(frag)
-                                            # Some upstreams may use message{} in non-stream events; handle defensively
-                                            m = ch.get("message") or {}
-                                            if not content_fragments and isinstance(m, dict):
-                                                frag2 = m.get("content")
-                                                if isinstance(frag2, str) and frag2:
-                                                    content_fragments.append(frag2)
-                                content_text = "".join(content_fragments)
-                                if content_text:
-                                    out_line = json.dumps({
-                                        "model": body.get("model"),
-                                        "created_at": datetime.now(timezone.utc).isoformat(),
-                                        "message": {"role": "assistant", "content": content_text},
-                                        "done": False,
-                                    }) + "\n"
-                                    if is_tool_call:
-                                        tool_call_buffer.append(out_line)
-                                    else:
-                                        yield out_line
-                                # If no content, skip emitting a line to avoid null-cast errors downstream
-                            except Exception:
-                                # As a fallback, skip emitting malformed chunks in Ollama NDJSON mode
-                                pass
-                        else:
-                            # OpenAI-style NDJSON line (object-per-line)
-                            line = out_payload + "\n"
-                            if is_tool_call:
-                                tool_call_buffer.append(line)
-                            else:
-                                yield line
+                                                for part in parts:
+                                                    if not part.strip():
+                                                        continue
 
-            if tool_call_detected:
-                yield "".join(tool_call_buffer)
-            # If no reasoning ever appeared but we buffered content, flush it before [DONE]
-            if (not seen_reasoning) and pre_reasoning_content_buffer:
-                try:
-                    flush_obj = {
-                        "choices": [
-                            {"delta": {"content": pre_reasoning_content_buffer}}
-                        ]
-                    }
-                    if output_mode == "sse":
-                        yield f"data: {json.dumps(flush_obj)}\n\n"
-                    else:
-                        if ndjson_schema == "ollama":
-                            # Map buffered content to Ollama chunk
-                            yield json.dumps({
-                                "model": body.get("model"),
-                                "created_at": datetime.now(timezone.utc).isoformat(),
-                                "message": {"role": "assistant", "content": pre_reasoning_content_buffer},
-                                "done": False,
-                            }) + "\n"
-                        else:
-                            yield json.dumps(flush_obj) + "\n"
-                except Exception:
-                    pass
-            if not done_received:
-                if output_mode == "sse":
-                    yield "data: [DONE]\n\n"
-                else:
-                    if ndjson_schema == "ollama":
-                        yield json.dumps({"model": body.get("model"), "done": True}) + "\n"
-                    else:
-                        yield json.dumps({"done": True}) + "\n"
-        else:
-            raw = r.content
-            try:
-                data = json.loads(raw)
-            except Exception:
-                data = raw.decode("utf-8", errors="ignore")
+                                                    data_lines: List[str] = []
+                                                    for line in part.splitlines():
+                                                        if line.startswith("data:"):
+                                                            data_lines.append(line[len("data:"):].lstrip())
+                                                    if not data_lines:
+                                                        continue
 
-            if (
-                isinstance(data, dict)
-                and data.get("choices")
-                and data["choices"][0].get("message")
-                and data["choices"][0]["message"].get("reasoning_content")
-            ):
-                reasoning_content = data["choices"][0]["message"]["reasoning_content"]
-                if THINKING_MODE == "show_reasoning":
-                    modified = dict(data)
-                    msg = dict(modified["choices"][0]["message"])  # shallow copy
-                    rc = str(reasoning_content).replace("\r\n", "\n")
-                    original = msg.get("content") or ""
-                    SEP = "\n\n---\n\n"
-                    if original:
-                        msg["content"] = "💭 " + rc + SEP + original
-                    else:
-                        msg["content"] = "💭 " + rc
-                    msg.pop("reasoning_content", None)
-                    modified["choices"][0]["message"] = msg
-                    data = modified
-            # Emit a single, well-formed payload depending on requested output_mode.
-            try:
-                if output_mode == "ndjson":
-                    if ndjson_schema == "ollama":
-                        # Convert a full, non-streaming response to a single Ollama-like message followed by done
-                        content_text = ""
-                        if isinstance(data, dict) and isinstance(data.get("choices"), list):
-                            for ch in data["choices"]:
+                                                    event_payload = "\n".join(data_lines)
+
+                                                    # Only process if event_payload is valid JSON and has non-empty content
+                                                    try:
+                                                        obj = json.loads(event_payload)
+                                                        choices = obj.get("choices") if isinstance(obj, dict) else None
+                                                        if isinstance(choices, list) and len(choices) > 0:
+                                                            delta = choices[0].get("delta")
+                                                            if isinstance(delta, dict):
+                                                                content = delta.get("content")
+                                                                if isinstance(content, str) and content.strip():
+                                                                    delta["role"] = "assistant"
+                                                                    out_payload = json.dumps(obj)
+                                                                    if output_mode == "sse":
+                                                                        out_event = f"data: {out_payload}\n\n"
+                                                                        if is_tool_call:
+                                                                            tool_call_buffer.append(out_event)
+                                                                        else:
+                                                                            yield out_event
+                                                                    else:
+                                                                        line = out_payload + "\n"
+                                                                        if is_tool_call:
+                                                                            tool_call_buffer.append(line)
+                                                                        else:
+                                                                            yield line
+                                                                # else: skip empty content chunks
+                                                            # else: skip if delta is not dict
+                                                        # else: skip if choices is not valid
+                                                    except Exception:
+                                                        continue
                                 if isinstance(ch, dict) and isinstance(ch.get("message"), dict):
                                     frag = ch["message"].get("content")
                                     if isinstance(frag, str) and frag:
