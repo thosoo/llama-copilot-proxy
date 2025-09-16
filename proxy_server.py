@@ -521,25 +521,26 @@ def fallback_proxy(path: str):
             timeout=60,
         )
 
-        # Normalize path for /v1/models
+        # Normalize for any path ending with /v1/models
+        import os
+        def recursive_basename(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k in ("name", "model", "id") and isinstance(v, str):
+                        obj[k] = os.path.basename(v)
+                    else:
+                        obj[k] = recursive_basename(v)
+                return obj
+            elif isinstance(obj, list):
+                return [recursive_basename(i) for i in obj]
+            else:
+                return obj
+
         norm_path = path.lstrip("/")
-        if norm_path == "v1/models" and resp.status_code == 200:
+        if norm_path.endswith("v1/models") and resp.status_code == 200:
             try:
-                import os
                 obj = resp.json()
-                def basename_fields(d):
-                    for k in ["name", "model", "id"]:
-                        if k in d and isinstance(d[k], str):
-                            d[k] = os.path.basename(d[k])
-                    return d
-                # Patch top-level models list
-                if "models" in obj and isinstance(obj["models"], list):
-                    obj["models"] = [basename_fields(dict(m)) for m in obj["models"]]
-                # Patch top-level data list
-                if "data" in obj and isinstance(obj["data"], list):
-                    obj["data"] = [basename_fields(dict(m)) for m in obj["data"]]
-                # Patch top-level name/model/id
-                obj = basename_fields(obj)
+                obj = recursive_basename(obj)
                 return Response(json.dumps(obj), status=resp.status_code, mimetype="application/json")
             except Exception as e:
                 if VERBOSE:
