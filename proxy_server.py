@@ -1,45 +1,3 @@
-# Add /api/tags endpoint to normalize model names/ids
-@app.route("/api/tags", methods=["GET"])
-def api_tags():
-    # Fetch models from upstream /v1/models
-    try:
-        upstream_url = f"{UPSTREAM}/v1/models"
-        if VERBOSE:
-            print(f"🔎 [/api/tags] Fetching upstream models from {upstream_url} ...")
-        r = requests.get(upstream_url, timeout=15)
-        r.raise_for_status()
-        obj = r.json()
-        import os
-        def strip_model_name(val):
-            base = os.path.basename(val)
-            if base.endswith('.gguf'):
-                base = base[:-5]
-            return base
-
-        def basename_fields(d):
-            for k in ["name", "model", "id"]:
-                if k in d and isinstance(d[k], str):
-                    d[k] = strip_model_name(d[k])
-            return d
-        # Patch top-level models list
-        if "models" in obj and isinstance(obj["models"], list):
-            obj["models"] = [basename_fields(dict(m)) for m in obj["models"]]
-        # Patch top-level data list
-        if "data" in obj and isinstance(obj["data"], list):
-            obj["data"] = [basename_fields(dict(m)) for m in obj["data"]]
-        # Patch top-level name/model/id
-        obj = basename_fields(obj)
-        # Inject capabilities if missing
-        for m in obj.get("models", []):
-            if "capabilities" not in m:
-                m["capabilities"] = ["completion", "chat", "embeddings", "tools", "planAndExecute"]
-        if VERBOSE:
-            print(f"🔎 [/api/tags] Normalized models (models={len(obj.get('models',[]))}) with aliases; capabilities injected")
-        return jsonify(obj)
-    except Exception as e:
-        if VERBOSE:
-            print(f"[GET] /api/tags upstream error: {e}")
-        return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
 import os
 import json
 import time
@@ -132,13 +90,11 @@ def _friendly_model_name(mid: str) -> str:
 def _register_model_alias(alias: str, real_id: str):
     if not alias or not real_id:
         return
-    import os
-    # Always use just the filename for alias key
-    key = os.path.basename(alias)
+    key = alias
     idx = 2
     # Ensure uniqueness if multiple models collapse to the same alias
     while key in MODEL_ALIASES and MODEL_ALIASES.get(key) != real_id:
-        key = f"{os.path.basename(alias)} ({idx})"
+        key = f"{alias} ({idx})"
         idx += 1
     MODEL_ALIASES[key] = real_id
     if VERBOSE:
@@ -148,20 +104,18 @@ def _register_model_alias(alias: str, real_id: str):
 def _resolve_model_id(maybe_alias: Optional[str]) -> Optional[str]:
     if not maybe_alias:
         return maybe_alias
-    import os
-    # Always use just the filename for lookup
-    key = os.path.basename(maybe_alias)
-    return MODEL_ALIASES.get(key, maybe_alias)
+    return MODEL_ALIASES.get(maybe_alias, maybe_alias)
 
 
 def _select_output_mode(accept_header: Optional[str]) -> str:
     """Choose streaming output mode from Accept header.
 
     - Default to SSE for OpenAI-compatible clients.
-    - Switch to NDJSON only if the client explicitly requests application/x-ndjson.
+        - Prefer NDJSON if the client requests application/json or application/x-ndjson
+            (ollama-js and many tools set Accept: application/json for NDJSON streaming).
     """
     a = (accept_header or "").lower()
-    if "application/x-ndjson" in a:
+        if "application/x-ndjson" in a or "application/json" in a:
         return "ndjson"
     # If client explicitly says text/event-stream, keep SSE (default anyway)
     return "sse"
@@ -173,16 +127,152 @@ def process_queued_show_requests():
         print("[INFO] process_queued_show_requests invoked (no-op)")
 
 
+def _client_wants_stream(body: Dict[str, Any]) -> bool:
+    """Return True if the request body asks for streaming.
 
-def _stream_chat_completion(upstream_url, body, output_mode, ndjson_schema):
-                        choices = obj.get("choices") if isinstance(obj, dict) else None
-                        if isinstance(choices, list) and len(choices) > 0:
-                            delta = choices[0].get("delta")
-                            if isinstance(delta, dict):
-                                content = delta.get("content")
-                                # Only emit if content is a non-empty string
-                                if isinstance(content, str) and content.strip():
-                                    delta["role"] = "assistant"
+    Accepts typical boolean forms (True/"true"/"1" etc.). Defaults to False.
+    """
+    if not isinstance(body, dict):
+        return False
+    val = body.get("stream")
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    return False
+
+
+def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode: str, ndjson_schema: str):
+    """Stream from upstream and emit either SSE or NDJSON with a final 'done' marker.
+
+    - Parses upstream as SSE or NDJSON automatically based on Content-Type and payloads.
+    - Adds role="assistant" to deltas when content is present.
+    - Ensures a terminal event is emitted: [DONE] for SSE or {"done": true} for NDJSON.
+    """
+    if VERBOSE:
+        print(f"[STREAM] Proxying to {upstream_url} with output_mode={output_mode}")
+    done_emitted = False
+    try:
+        r = requests.post(upstream_url, json=body, stream=True, timeout=120)
+        r.raise_for_status()
+        upstream_ct = (r.headers.get("Content-Type") or "").lower()
+        if VERBOSE:
+            print("[VLOG] [POST] Upstream response status:", r.status_code)
+            print("[VLOG] [POST] Upstream response headers:", dict(r.headers))
+            print(f"🔧 [STREAM] generator start: output_mode={output_mode!r} upstream_content_type={upstream_ct!r}")
+
+        buffer = ""
+
+        def emit_sse_json(obj: Dict[str, Any]):
+            payload = json.dumps(obj, ensure_ascii=False)
+            return f"data: {payload}\n\n"
+
+        def handle_obj(obj: Any):
+            nonlocal done_emitted
+            # Normalize OpenAI-like streaming objects
+            try:
+                if isinstance(obj, dict):
+                    # Mark role on assistant deltas
+                    choices = obj.get("choices")
+                    if isinstance(choices, list) and choices:
+                        delta = choices[0].get("delta")
+                        if isinstance(delta, dict):
+                            content = delta.get("content")
+                            if isinstance(content, str) and content.strip():
+                                delta["role"] = "assistant"
+                    # Detect completion markers in various shapes
+                    if obj.get("done") is True:
+                        done_emitted = True
+                elif isinstance(obj, str) and obj.strip() == "[DONE]":
+                    done_emitted = True
+            except Exception:
+                pass
+
+            # Emit in requested format
+            if output_mode == "sse":
+                if isinstance(obj, str) and obj.strip() == "[DONE]":
+                    return emit_sse_json({"done": True})
+                if isinstance(obj, dict):
+                    return emit_sse_json(obj)
+                # Fallback
+                return emit_sse_json({"message": str(obj)})
+            else:
+                # NDJSON mode
+                if isinstance(obj, str) and obj.strip() == "[DONE]":
+                    return json.dumps({"done": True}, ensure_ascii=False) + "\n"
+                line = json.dumps(obj, ensure_ascii=False) + "\n"
+                return line
+
+        # Decide how to parse incoming chunks
+        upstream_is_sse = "text/event-stream" in upstream_ct
+
+        for chunk in r.iter_content(chunk_size=1024):
+            if not chunk:
+                continue
+            s = chunk.decode("utf-8", errors="ignore")
+            buffer += s
+            if upstream_is_sse:
+                parts = buffer.split("\n\n")
+                buffer = parts.pop() if parts else ""
+                for part in parts:
+                    if not part.strip():
+                        continue
+                    data_lines = []
+                    for line in part.splitlines():
+                        if line.startswith("data:"):
+                            data_lines.append(line[len("data:"):].lstrip())
+                    if not data_lines:
+                        continue
+                    payload = "\n".join(data_lines)
+                    try:
+                        if payload.strip() == "[DONE]":
+                            out = handle_obj("[DONE]")
+                            if out:
+                                yield out
+                            continue
+                        obj = json.loads(payload)
+                    except Exception:
+                        obj = {"message": payload}
+                    out = handle_obj(obj)
+                    if out:
+                        yield out
+            else:
+                # NDJSON or chunked JSON
+                lines = buffer.split("\n")
+                buffer = lines.pop() if lines else ""
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        if line.strip() == "[DONE]":
+                            obj = "[DONE]"
+                        else:
+                            obj = {"message": line}
+                    out = handle_obj(obj)
+                    if out:
+                        yield out
+
+        # Ensure a terminal marker for clients expecting it
+        if not done_emitted:
+            if output_mode == "sse":
+                yield emit_sse_json({"done": True, "model": body.get("model")})
+            else:
+                yield json.dumps({"done": True, "model": body.get("model")}, ensure_ascii=False) + "\n"
+    except Exception as e:
+        if VERBOSE:
+            print(f"[STREAM] Upstream error: {e}")
+        # Yield a minimal error event and done marker
+        err_obj = {"model": body.get("model"), "error": str(e)}
+        if output_mode == "sse":
+            yield f"data: {json.dumps(err_obj)}\n\n"
+            yield f"data: {json.dumps({"done": True})}\n\n"
+        else:
+            yield json.dumps(err_obj) + "\n"
+            yield json.dumps({"done": True}) + "\n"
 
 
 def _increment_streams():
@@ -220,105 +310,13 @@ def _prepare_chat_body_and_log(body: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(body.get("tools"), list):
         print(f"🔧 [TOOLS] Tool request detected with {len(body['tools'])} tools")
         vlog("[POST] Full tool-calling request body:", json.dumps(body, indent=2))
-        if THINKING_DEBUG:
-            def _stream_chat_completion(upstream_url, body, output_mode, ndjson_schema):
-                """
-                Streams the upstream response, parses events, and yields only valid Copilot-compatible events.
-                """
-                import requests
-                import json
-                from datetime import datetime, timezone
-                if VERBOSE:
-                    print(f"[STREAM] Proxying to {upstream_url} with output_mode={output_mode}")
-                try:
-                    r = requests.post(upstream_url, json=body, stream=True, timeout=120)
-                    r.raise_for_status()
-                    buffer = ""
-                    for chunk in r.iter_content(chunk_size=1024):
-                        if not chunk:
-                            continue
-                        s = chunk.decode("utf-8", errors="ignore")
-                        buffer += s
-                        # Split into SSE events (lines starting with 'data:') or NDJSON lines
-                        if output_mode == "sse":
-                            parts = buffer.split("\n\n")
-                            buffer = parts.pop() if parts else ""
-                            for part in parts:
-                                if not part.strip():
-                                    continue
-                                data_lines = []
-                                for line in part.splitlines():
-                                    if line.startswith("data:"):
-                                        data_lines.append(line[len("data:"):].lstrip())
-                                if not data_lines:
-                                    continue
-                                event_payload = "\n".join(data_lines)
-                                try:
-                                    obj = json.loads(event_payload)
-                                    choices = obj.get("choices") if isinstance(obj, dict) else None
-                                    if isinstance(choices, list) and len(choices) > 0:
-                                        delta = choices[0].get("delta")
-                                        if isinstance(delta, dict):
-                                            content = delta.get("content")
-                                            if isinstance(content, str) and content.strip():
-                                                delta["role"] = "assistant"
-                                                out_payload = json.dumps(obj)
-                                                out_event = f"data: {out_payload}\n\n"
-                                                if VERBOSE:
-                                                    print(f"[STREAM] Yielding event: {out_event}")
-                                                yield out_event
-                                except Exception as e:
-                                    if VERBOSE:
-                                        print(f"[STREAM] Failed to parse event: {e}")
-                                    continue
-                        else:  # NDJSON
-                            lines = buffer.split("\n")
-                            buffer = lines.pop() if lines else ""
-                            for line in lines:
-                                if not line.strip():
-                                    continue
-                                try:
-                                    obj = json.loads(line)
-                                    choices = obj.get("choices") if isinstance(obj, dict) else None
-                                    if isinstance(choices, list) and len(choices) > 0:
-                                        delta = choices[0].get("delta")
-                                        if isinstance(delta, dict):
-                                            content = delta.get("content")
-                                            if isinstance(content, str) and content.strip():
-                                                delta["role"] = "assistant"
-                                                out_payload = json.dumps(obj)
-                                                if VERBOSE:
-                                                    print(f"[STREAM] Yielding NDJSON event: {out_payload}")
-                                                yield out_payload + "\n"
-                                except Exception as e:
-                                    if VERBOSE:
-                                        print(f"[STREAM] Failed to parse NDJSON event: {e}")
-                                    continue
-                    # At the end, yield a final 'done' event
-                    done_event = {"model": body.get("model"), "done": True}
-                    if output_mode == "sse":
-                        yield f"data: {json.dumps(done_event)}\n\n"
-                    else:
-                        yield json.dumps(done_event) + "\n"
-                except Exception as e:
-                    if VERBOSE:
-                        print(f"[STREAM] Upstream error: {e}")
-                    # Yield a minimal error event
-                    err_event = {"model": body.get("model"), "error": str(e), "done": True}
-                    if output_mode == "sse":
-                        yield f"data: {json.dumps(err_event)}\n\n"
-                    else:
-                        yield json.dumps(err_event) + "\n"
 
 
 @app.post("/api/show")
 def api_show():
     # Show model information; map to /v1/models/{model} when Ollama endpoint is unavailable
     body = request.get_json(silent=True) or {}
-    import os
     model = _resolve_model_id(body.get("model"))
-    # Always use just the filename for model
-    model = os.path.basename(model) if isinstance(model, str) else model
     if not isinstance(model, str) or not model:
         return jsonify({"error": "bad_request", "message": "Missing 'model' in body"}), 400
     # Try llama.cpp OpenAI-compatible endpoint
@@ -490,6 +488,69 @@ def chat_completions():
             return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
 
 
+@app.post("/api/chat")
+def api_chat():
+    """Ollama-compatible chat endpoint for clients like librechat/ollama-js.
+
+    Maps to upstream OpenAI-compatible /v1/chat/completions and normalizes the stream:
+    - If client Accepts application/json, emit NDJSON with {"done": true} at the end.
+    - If client Accepts text/event-stream, emit SSE with a final done event.
+    """
+    print("➡️  [REQ] POST /api/chat UA=", request.headers.get("User-Agent", ""))
+    body = request.get_json(silent=True) or {}
+    if VERBOSE:
+        print("[POST] Proxying Copilot /api/chat -> /v1/chat/completions")
+        print("[POST] Headers:", dict(request.headers))
+    body = _prepare_chat_body_and_log(body)
+
+    upstream_url = f"{UPSTREAM}/v1/chat/completions"
+    if _client_wants_stream(body):
+        _increment_streams()
+        try:
+            accept = request.headers.get("Accept", "")
+            ua = request.headers.get("User-Agent", "")
+            output_mode = _select_output_mode(accept)
+            if THINKING_DEBUG or VERBOSE:
+                print(f"🔧 [STREAM] /api/chat selected output_mode={output_mode!r} Accept={accept!r} UA={ua!r} stream={body.get('stream')!r}")
+            ndjson_schema = "ollama"  # NDJSON expected by ollama-js
+            generator = _stream_chat_completion(upstream_url, body, output_mode=output_mode, ndjson_schema=ndjson_schema)
+
+            def _cleanup_generator(gen):
+                try:
+                    for x in gen:
+                        yield x
+                finally:
+                    _decrement_streams("stream end")
+
+            mimetype = "application/x-ndjson" if output_mode == "ndjson" else "text/event-stream"
+            resp = Response(stream_with_context(_cleanup_generator(generator)), mimetype=mimetype)
+            resp.headers["Vary"] = "Accept"
+            if output_mode == "sse":
+                resp.headers["Cache-Control"] = "no-cache"
+                resp.headers["X-Accel-Buffering"] = "no"
+                resp.headers["Connection"] = "keep-alive"
+            return resp
+        except Exception as e:
+            _decrement_streams("upstream error")
+            if VERBOSE:
+                print("[POST] Upstream request error for /api/chat:", e)
+            return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
+    else:
+        try:
+            resp = requests.post(upstream_url, json=body, timeout=120)
+            resp.raise_for_status()
+            try:
+                data = resp.json()
+                # Ollama-compatible: wrap into a non-streaming final result if needed
+                return Response(json.dumps(data), status=resp.status_code, mimetype="application/json")
+            except Exception:
+                return Response(resp.content, status=resp.status_code, mimetype="application/json")
+        except Exception as e:
+            if VERBOSE:
+                print("[POST] Upstream request error for /api/chat:", e)
+            return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
+
+
 @app.route("/debug/json", methods=["POST"])
 def debug_json():
     body = request.get_json(silent=True) or {}
@@ -526,41 +587,6 @@ def fallback_proxy(path: str):
             stream=True,
             timeout=60,
         )
-
-        # Normalize for any path ending with /v1/models
-        import os
-        def strip_model_name(val):
-            # Remove path and .gguf extension
-            base = os.path.basename(val)
-            if base.endswith('.gguf'):
-                base = base[:-5]
-            return base
-
-        def recursive_basename(obj):
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    if k in ("name", "model", "id") and isinstance(v, str):
-                        obj[k] = strip_model_name(v)
-                    else:
-                        obj[k] = recursive_basename(v)
-                return obj
-            elif isinstance(obj, list):
-                return [recursive_basename(i) for i in obj]
-            else:
-                return obj
-
-        # Robust path normalization for /v1/models (handles trailing slash and query)
-        norm_path = path.lstrip("/").split("?")[0].rstrip("/")
-        if norm_path == "v1/models" and resp.status_code == 200:
-            try:
-                obj = resp.json()
-                obj = recursive_basename(obj)
-                return Response(json.dumps(obj), status=resp.status_code, mimetype="application/json")
-            except Exception as e:
-                if VERBOSE:
-                    print("🚨 PATCH /v1/models error:", e)
-                # fallback to original response
-                pass
 
         def generate():
             for chunk in resp.iter_content(chunk_size=8192):
