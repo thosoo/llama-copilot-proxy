@@ -184,6 +184,10 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                             content = delta.get("content")
                             if isinstance(content, str) and content.strip():
                                 delta["role"] = "assistant"
+                        # Treat OpenAI-style finish_reason as a terminal marker, too
+                        finish_reason = choices[0].get("finish_reason")
+                        if finish_reason is not None:
+                            done_emitted = True
                     # Detect completion markers in various shapes
                     if obj.get("done") is True:
                         done_emitted = True
@@ -215,14 +219,17 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                     if isinstance(obj, dict):
                         # Try to extract content delta from OpenAI-like chunk
                         content = None
+                        finish_reason = None
                         try:
                             choices = obj.get("choices")
                             if isinstance(choices, list) and choices:
                                 delta = choices[0].get("delta")
                                 if isinstance(delta, dict):
                                     content = delta.get("content")
+                                finish_reason = choices[0].get("finish_reason")
                         except Exception:
                             content = None
+                            finish_reason = None
                         if isinstance(content, str) and content != "":
                             return json.dumps({
                                 "model": body.get("model") or obj.get("model"),
@@ -231,13 +238,16 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                                 "done": False
                             }, ensure_ascii=False) + "\n"
                         # If not a delta with content, pass through only if it already looks like ollama
-                        if obj.get("done") is True:
-                            return json.dumps({
+                        if obj.get("done") is True or finish_reason is not None:
+                            final_obj = {
                                 "model": body.get("model") or obj.get("model"),
                                 "created_at": ts,
                                 "message": {"role": "assistant", "content": ""},
                                 "done": True
-                            }, ensure_ascii=False) + "\n"
+                            }
+                            if finish_reason:
+                                final_obj["done_reason"] = finish_reason
+                            return json.dumps(final_obj, ensure_ascii=False) + "\n"
                         # Drop non-content noise to avoid confusing clients
                         return None
                 # Default NDJSON passthrough
@@ -357,9 +367,10 @@ def _prepare_chat_body_and_log(body: Dict[str, Any]) -> Dict[str, Any]:
         print(f"⚠️  [WARNING] Large prompt detected (~{est_tokens} tokens). This may cause timeout issues.")
         print("⚠️  [TIP] Consider reducing context size or increasing timeout settings.")
 
-    if isinstance(body.get("tools"), list):
-        print(f"🔧 [TOOLS] Tool request detected with {len(body['tools'])} tools")
-        vlog("[POST] Full tool-calling request body:", json.dumps(body, indent=2))
+        if isinstance(body.get("tools"), list):
+            print(f"🔧 [TOOLS] Tool request detected with {len(body['tools'])} tools")
+            vlog("[POST] Full tool-calling request body:", json.dumps(body, indent=2))
+
         # Always return the (possibly inspected) body; callers rely on it
         return body
 
@@ -564,7 +575,7 @@ def api_chat():
             # Force NDJSON for Ollama-compatible /api/chat to satisfy ollama-js/LibreChat
             output_mode = "ndjson"
             if THINKING_DEBUG or VERBOSE:
-                print(f"🔧 [STREAM] /api/chat selected output_mode={output_mode!r} Accept={accept!r} UA={ua!r} stream={body.get('stream')!r}")
+                print(f"🔧 [STREAM] /api/chat forcing NDJSON streaming (output_mode={output_mode!r}) Accept={accept!r} UA={ua!r} stream={body.get('stream')!r}")
             ndjson_schema = "ollama"  # NDJSON expected by ollama-js
             generator = _stream_chat_completion(upstream_url, body, output_mode=output_mode, ndjson_schema=ndjson_schema)
 
@@ -578,6 +589,11 @@ def api_chat():
             mimetype = "application/x-ndjson" if output_mode == "ndjson" else "text/event-stream"
             resp = Response(stream_with_context(_cleanup_generator(generator)), mimetype=mimetype)
             resp.headers["Vary"] = "Accept"
+            # For NDJSON, also disable buffering to ensure timely delivery of lines
+            if output_mode == "ndjson":
+                resp.headers["Cache-Control"] = "no-cache"
+                resp.headers["X-Accel-Buffering"] = "no"
+                resp.headers["Connection"] = "keep-alive"
             if output_mode == "sse":
                 resp.headers["Cache-Control"] = "no-cache"
                 resp.headers["X-Accel-Buffering"] = "no"
