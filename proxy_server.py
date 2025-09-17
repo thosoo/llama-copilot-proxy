@@ -306,8 +306,9 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
         # Yield a minimal error event and done marker
         err_obj = {"model": body.get("model"), "error": str(e)}
         if output_mode == "sse":
-            yield f"data: {json.dumps(err_obj)}\n\n"
-            yield f"data: {json.dumps({"done": True})}\n\n"
+            # Avoid f-string with inline dict to prevent brace parsing issues
+            yield "data: " + json.dumps(err_obj) + "\n\n"
+            yield "data: " + json.dumps({"done": True}) + "\n\n"
         else:
             yield json.dumps(err_obj) + "\n"
             yield json.dumps({"done": True}) + "\n"
@@ -662,6 +663,12 @@ def _print_banner():
     print("   - 'show_reasoning': Route thinking to normal content stream (VSCode will display it!)")
     print("   - 'off': Disable thinking content entirely")
     print("\n   Configure with: THINKING_MODE=show_reasoning THINKING_DEBUG=true python proxy_server.py")
+
+
+@app.get("/api/version")
+def api_version():
+    # Lightweight health/version endpoint for docker healthcheck
+    return jsonify({"version": VERSION, "status": "ok"}), 200
 
 
 if __name__ == "__main__":
