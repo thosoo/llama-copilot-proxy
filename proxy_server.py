@@ -110,15 +110,17 @@ def _resolve_model_id(maybe_alias: Optional[str]) -> Optional[str]:
 def _select_output_mode(accept_header: Optional[str]) -> str:
     """Choose streaming output mode from Accept header.
 
-    - Default to SSE for OpenAI-compatible clients.
-        - Prefer NDJSON if the client requests application/json or application/x-ndjson
-            (ollama-js and many tools set Accept: application/json for NDJSON streaming).
+    - If client requests text/event-stream, use SSE.
+    - If client requests application/json or application/x-ndjson, use NDJSON.
+    - Otherwise, default to NDJSON (safer for ollama-js/LibreChat).
     """
     a = (accept_header or "").lower()
-        if "application/x-ndjson" in a or "application/json" in a:
+    if "text/event-stream" in a:
+        return "sse"
+    if "application/x-ndjson" in a or "application/json" in a:
         return "ndjson"
-    # If client explicitly says text/event-stream, keep SSE (default anyway)
-    return "sse"
+    # Generic default
+    return "ndjson"
 
 
 def process_queued_show_requests():
@@ -200,10 +202,46 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                 return emit_sse_json({"message": str(obj)})
             else:
                 # NDJSON mode
+                # Ollama schema translation for LibreChat/ollama-js
+                if ndjson_schema == "ollama":
+                    ts = datetime.now(timezone.utc).isoformat()
+                    if isinstance(obj, str) and obj.strip() == "[DONE]":
+                        return json.dumps({
+                            "model": body.get("model"),
+                            "created_at": ts,
+                            "done": True
+                        }, ensure_ascii=False) + "\n"
+                    if isinstance(obj, dict):
+                        # Try to extract content delta from OpenAI-like chunk
+                        content = None
+                        try:
+                            choices = obj.get("choices")
+                            if isinstance(choices, list) and choices:
+                                delta = choices[0].get("delta")
+                                if isinstance(delta, dict):
+                                    content = delta.get("content")
+                        except Exception:
+                            content = None
+                        if isinstance(content, str) and content != "":
+                            return json.dumps({
+                                "model": body.get("model") or obj.get("model"),
+                                "created_at": ts,
+                                "message": {"role": "assistant", "content": content},
+                                "done": False
+                            }, ensure_ascii=False) + "\n"
+                        # If not a delta with content, pass through only if it already looks like ollama
+                        if obj.get("done") is True:
+                            return json.dumps({
+                                "model": body.get("model") or obj.get("model"),
+                                "created_at": ts,
+                                "done": True
+                            }, ensure_ascii=False) + "\n"
+                        # Drop non-content noise to avoid confusing clients
+                        return None
+                # Default NDJSON passthrough
                 if isinstance(obj, str) and obj.strip() == "[DONE]":
                     return json.dumps({"done": True}, ensure_ascii=False) + "\n"
-                line = json.dumps(obj, ensure_ascii=False) + "\n"
-                return line
+                return json.dumps(obj, ensure_ascii=False) + "\n"
 
         # Decide how to parse incoming chunks
         upstream_is_sse = "text/event-stream" in upstream_ct
