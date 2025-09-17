@@ -547,7 +547,8 @@ def api_chat():
         try:
             accept = request.headers.get("Accept", "")
             ua = request.headers.get("User-Agent", "")
-            output_mode = _select_output_mode(accept)
+            # Force NDJSON for Ollama-compatible /api/chat to satisfy ollama-js/LibreChat
+            output_mode = "ndjson"
             if THINKING_DEBUG or VERBOSE:
                 print(f"🔧 [STREAM] /api/chat selected output_mode={output_mode!r} Accept={accept!r} UA={ua!r} stream={body.get('stream')!r}")
             ndjson_schema = "ollama"  # NDJSON expected by ollama-js
