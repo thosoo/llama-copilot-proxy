@@ -311,7 +311,17 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
             if output_mode == "sse":
                 yield emit_sse_json({"done": True, "model": body.get("model")})
             else:
-                yield json.dumps({"done": True, "model": body.get("model")}, ensure_ascii=False) + "\n"
+                if ndjson_schema == "ollama":
+                    ts = datetime.now(timezone.utc).isoformat()
+                    final_obj = {
+                        "model": body.get("model"),
+                        "created_at": ts,
+                        "message": {"role": "assistant", "content": ""},
+                        "done": True
+                    }
+                    yield json.dumps(final_obj, ensure_ascii=False) + "\n"
+                else:
+                    yield json.dumps({"done": True, "model": body.get("model")}, ensure_ascii=False) + "\n"
     except Exception as e:
         if VERBOSE:
             print(f"[STREAM] Upstream error: {e}")
@@ -371,8 +381,8 @@ def _prepare_chat_body_and_log(body: Dict[str, Any]) -> Dict[str, Any]:
             print(f"🔧 [TOOLS] Tool request detected with {len(body['tools'])} tools")
             vlog("[POST] Full tool-calling request body:", json.dumps(body, indent=2))
 
-        # Always return the (possibly inspected) body; callers rely on it
-        return body
+    # Always return the (possibly inspected) body; callers rely on it
+    return body
 
 
 @app.post("/api/show")
