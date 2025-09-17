@@ -209,6 +209,7 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                         return json.dumps({
                             "model": body.get("model"),
                             "created_at": ts,
+                            "message": {"role": "assistant", "content": ""},
                             "done": True
                         }, ensure_ascii=False) + "\n"
                     if isinstance(obj, dict):
@@ -234,6 +235,7 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                             return json.dumps({
                                 "model": body.get("model") or obj.get("model"),
                                 "created_at": ts,
+                                "message": {"role": "assistant", "content": ""},
                                 "done": True
                             }, ensure_ascii=False) + "\n"
                         # Drop non-content noise to avoid confusing clients
@@ -311,7 +313,16 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
             yield "data: " + json.dumps({"done": True}) + "\n\n"
         else:
             yield json.dumps(err_obj) + "\n"
-            yield json.dumps({"done": True}) + "\n"
+            if ndjson_schema == "ollama":
+                ts = datetime.now(timezone.utc).isoformat()
+                yield json.dumps({
+                    "model": body.get("model"),
+                    "created_at": ts,
+                    "message": {"role": "assistant", "content": ""},
+                    "done": True
+                }) + "\n"
+            else:
+                yield json.dumps({"done": True}) + "\n"
 
 
 def _increment_streams():
@@ -349,6 +360,8 @@ def _prepare_chat_body_and_log(body: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(body.get("tools"), list):
         print(f"🔧 [TOOLS] Tool request detected with {len(body['tools'])} tools")
         vlog("[POST] Full tool-calling request body:", json.dumps(body, indent=2))
+        # Always return the (possibly inspected) body; callers rely on it
+        return body
 
 
 @app.post("/api/show")
@@ -581,8 +594,29 @@ def api_chat():
             resp.raise_for_status()
             try:
                 data = resp.json()
-                # Ollama-compatible: wrap into a non-streaming final result if needed
-                return Response(json.dumps(data), status=resp.status_code, mimetype="application/json")
+                # Ollama-compatible: convert OpenAI response to Ollama final object shape
+                ts = datetime.now(timezone.utc).isoformat()
+                content = None
+                finish_reason = None
+                try:
+                    choices = data.get("choices")
+                    if isinstance(choices, list) and choices:
+                        ch0 = choices[0]
+                        finish_reason = ch0.get("finish_reason")
+                        msg = ch0.get("message")
+                        if isinstance(msg, dict):
+                            content = msg.get("content")
+                except Exception:
+                    pass
+                final_obj = {
+                    "model": body.get("model") or data.get("model"),
+                    "created_at": ts,
+                    "message": {"role": "assistant", "content": content or ""},
+                    "done": True,
+                }
+                if finish_reason:
+                    final_obj["done_reason"] = finish_reason
+                return Response(json.dumps(final_obj), status=resp.status_code, mimetype="application/json")
             except Exception:
                 return Response(resp.content, status=resp.status_code, mimetype="application/json")
         except Exception as e:
