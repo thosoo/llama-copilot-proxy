@@ -19,7 +19,7 @@ UPSTREAM = os.environ.get("UPSTREAM", "http://10.66.0.5:8080")
 THINKING_MODE = os.environ.get("THINKING_MODE", "default")
 THINKING_DEBUG = os.environ.get("THINKING_DEBUG", "false").lower() in ("1", "true", "yes")
 VERBOSE = os.environ.get("VERBOSE", "false").lower() in ("1", "true", "yes")
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 active_streams = 0
 MODEL_ALIASES: Dict[str, str] = {}
 
@@ -601,13 +601,17 @@ def api_chat():
             resp.headers["Vary"] = "Accept"
             # For NDJSON, also disable buffering to ensure timely delivery of lines
             if output_mode == "ndjson":
+                # Be explicit for clients that check for charset
+                resp.headers["Content-Type"] = "application/x-ndjson; charset=utf-8"
                 resp.headers["Cache-Control"] = "no-cache"
                 resp.headers["X-Accel-Buffering"] = "no"
                 resp.headers["Connection"] = "keep-alive"
+                resp.headers["X-Proxy-Build"] = VERSION
             if output_mode == "sse":
                 resp.headers["Cache-Control"] = "no-cache"
                 resp.headers["X-Accel-Buffering"] = "no"
                 resp.headers["Connection"] = "keep-alive"
+                resp.headers["X-Proxy-Build"] = VERSION
             return resp
         except Exception as e:
             _decrement_streams("upstream error")
