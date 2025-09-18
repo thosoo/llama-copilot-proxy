@@ -19,7 +19,7 @@ UPSTREAM = os.environ.get("UPSTREAM", "http://10.66.0.5:8080")
 THINKING_MODE = os.environ.get("THINKING_MODE", "default")
 THINKING_DEBUG = os.environ.get("THINKING_DEBUG", "false").lower() in ("1", "true", "yes")
 VERBOSE = os.environ.get("VERBOSE", "false").lower() in ("1", "true", "yes")
-VERSION = "1.0.1"
+VERSION = "1.0.4"
 active_streams = 0
 MODEL_ALIASES: Dict[str, str] = {}
 
@@ -155,7 +155,8 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
     """
     if VERBOSE:
         print(f"[STREAM] Proxying to {upstream_url} with output_mode={output_mode}")
-    done_emitted = False
+    done_emitted = False  # True once any terminal condition observed (finish_reason, explicit done flag, [DONE])
+    final_done_sent = False  # True once we have actually yielded a final done object to client
     try:
         r = requests.post(upstream_url, json=body, stream=True, timeout=120)
         r.raise_for_status()
@@ -173,6 +174,7 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
 
         def handle_obj(obj: Any):
             nonlocal done_emitted
+            nonlocal final_done_sent
             # Normalize OpenAI-like streaming objects
             try:
                 if isinstance(obj, dict):
@@ -210,6 +212,9 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                 if ndjson_schema == "ollama":
                     ts = datetime.now(timezone.utc).isoformat()
                     if isinstance(obj, str) and obj.strip() == "[DONE]":
+                        if done_emitted or final_done_sent:
+                            return None
+                        final_done_sent = True
                         return json.dumps({
                             "model": body.get("model"),
                             "created_at": ts,
@@ -247,6 +252,8 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                             }
                             if finish_reason:
                                 final_obj["done_reason"] = finish_reason
+                            done_emitted = True
+                            final_done_sent = True
                             return json.dumps(final_obj, ensure_ascii=False) + "\n"
                         # Drop non-content noise to avoid confusing clients
                         return None
@@ -306,8 +313,8 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                     if out:
                         yield out
 
-        # Ensure a terminal marker for clients expecting it
-        if not done_emitted:
+    # Ensure a terminal marker for clients expecting it (avoid duplicate when finish_reason handled)
+    if not final_done_sent:
             if output_mode == "sse":
                 yield emit_sse_json({"done": True, "model": body.get("model")})
             else:
@@ -733,6 +740,167 @@ def _print_banner():
 def api_version():
     # Lightweight health/version endpoint for docker healthcheck
     return jsonify({"version": VERSION, "status": "ok"}), 200
+
+
+@app.get("/api/tags")
+def api_tags():
+    """Return a list of available model tags in Ollama-compatible format.
+
+    LibreChat calls /api/tags to populate model dropdowns when using the Ollama backend.
+    We attempt to discover models from upstream /v1/models list (llama.cpp style) and
+    fall back to any registered aliases. Shape:
+    {
+      "models": [
+        {"name": "model-id", "modified_at": iso8601, "size": 0, "digest": "", "details": {"format": "gguf"}}
+      ]
+    }
+    """
+    models: List[Dict[str, Any]] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    # Try llama.cpp style model listing if available
+    try:
+        r = requests.get(f"{UPSTREAM}/v1/models", timeout=10)
+        if r.status_code == 200:
+            obj = r.json()
+            data = obj.get("data") if isinstance(obj, dict) else None
+            if isinstance(data, list):
+                for entry in data:
+                    mid = entry.get("id") if isinstance(entry, dict) else None
+                    if not isinstance(mid, str):
+                        continue
+                    models.append({
+                        "name": mid,
+                        "modified_at": now_iso,
+                        "size": 0,
+                        "digest": "",
+                        "details": {"format": "gguf"}
+                    })
+    except Exception as e:
+        if VERBOSE:
+            print("[GET] /api/tags upstream /v1/models error:", e)
+
+    # Include registered aliases if not already listed
+    for alias, real_id in MODEL_ALIASES.items():
+        if not any(m.get("name") == alias for m in models):
+            models.append({
+                "name": alias,
+                "modified_at": now_iso,
+                "size": 0,
+                "digest": "",
+                "details": {"format": "gguf"}
+            })
+
+    # Deduplicate preserving order
+    seen = set()
+    deduped = []
+    for m in models:
+        n = m.get("name")
+        if n in seen:
+            continue
+        seen.add(n)
+        deduped.append(m)
+
+    return jsonify({"models": deduped}), 200
+
+
+@app.post("/api/generate")
+def api_generate():
+    """Ollama-compatible /api/generate endpoint.
+
+    Accepts {"model": "name", "prompt": "...", "stream": true|false}
+    We translate this to upstream /v1/chat/completions with messages derived from the prompt.
+    Streaming: outputs Ollama generate-style NDJSON objects with keys: response, done, model, created_at.
+    Final line has done:true.
+    """
+    body = request.get_json(silent=True) or {}
+    model = _resolve_model_id(body.get("model"))
+    prompt = body.get("prompt") if isinstance(body.get("prompt"), str) else ""
+    stream = _client_wants_stream(body)
+    upstream_body = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True if stream else False,
+    }
+    upstream_url = f"{UPSTREAM}/v1/chat/completions"
+
+    if stream:
+        _increment_streams()
+        try:
+            def translate_gen():
+                for line in _stream_chat_completion(upstream_url, upstream_body, output_mode="ndjson", ndjson_schema="ollama"):
+                    # We receive NDJSON lines shaped for schema selection; intercept and map.
+                    try:
+                        obj = json.loads(line)
+                        # If already a final done line pass through after ensuring keys
+                        if obj.get("done") is True:
+                            if "response" not in obj:
+                                obj["response"] = obj.get("message", {}).get("content", "") if isinstance(obj.get("message"), dict) else ""
+                            if "created_at" not in obj:
+                                obj["created_at"] = datetime.now(timezone.utc).isoformat()
+                            yield json.dumps(obj, ensure_ascii=False) + "\n"
+                            continue
+                        # Content line: adapt 'message.content' -> 'response'
+                        if obj.get("done") is False:
+                            if "response" not in obj:
+                                obj["response"] = obj.get("message", {}).get("content", "") if isinstance(obj.get("message"), dict) else ""
+                            yield json.dumps({
+                                "model": obj.get("model"),
+                                "created_at": obj.get("created_at"),
+                                "response": obj.get("response", ""),
+                                "done": False
+                            }, ensure_ascii=False) + "\n"
+                            continue
+                    except Exception:
+                        pass
+                    yield line
+            def _cleanup(gen):
+                try:
+                    for x in gen:
+                        yield x
+                finally:
+                    _decrement_streams("stream end")
+            resp = Response(stream_with_context(_cleanup(translate_gen())), mimetype="application/x-ndjson")
+            resp.headers["Content-Type"] = "application/x-ndjson; charset=utf-8"
+            resp.headers["Cache-Control"] = "no-cache"
+            resp.headers["X-Accel-Buffering"] = "no"
+            resp.headers["Connection"] = "keep-alive"
+            resp.headers["X-Proxy-Build"] = VERSION
+            return resp
+        except Exception as e:
+            _decrement_streams("upstream error")
+            return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
+    else:
+        try:
+            r = requests.post(upstream_url, json=upstream_body, timeout=120)
+            r.raise_for_status()
+            data = r.json()
+            ts = datetime.now(timezone.utc).isoformat()
+            content = ""
+            try:
+                chs = data.get("choices")
+                if isinstance(chs, list) and chs:
+                    msg = chs[0].get("message")
+                    if isinstance(msg, dict):
+                        content = msg.get("content") or ""
+            except Exception:
+                pass
+            final_obj = {
+                "model": model or data.get("model"),
+                "created_at": ts,
+                "response": content,
+                "done": True
+            }
+            return jsonify(final_obj)
+        except Exception as e:
+            return jsonify({"error": "upstream_connection_error", "message": str(e)}), 502
+
+
+@app.after_request
+def add_cors_headers(resp):
+    resp.headers.setdefault("Access-Control-Allow-Origin", "*")
+    resp.headers.setdefault("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    resp.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    return resp
 
 
 if __name__ == "__main__":
