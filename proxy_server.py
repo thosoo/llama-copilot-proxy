@@ -313,22 +313,22 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any], output_mode
                     if out:
                         yield out
 
-    # Ensure a terminal marker for clients expecting it (avoid duplicate when finish_reason handled)
-    if not final_done_sent:
-            if output_mode == "sse":
-                yield emit_sse_json({"done": True, "model": body.get("model")})
+    # Ensure a terminal marker for clients expecting it (only if neither a finish_reason nor [DONE] produced output)
+    if not (done_emitted or final_done_sent):
+        if output_mode == "sse":
+            yield emit_sse_json({"done": True, "model": body.get("model")})
+        else:
+            if ndjson_schema == "ollama":
+                ts = datetime.now(timezone.utc).isoformat()
+                final_obj = {
+                    "model": body.get("model"),
+                    "created_at": ts,
+                    "message": {"role": "assistant", "content": ""},
+                    "done": True
+                }
+                yield json.dumps(final_obj, ensure_ascii=False) + "\n"
             else:
-                if ndjson_schema == "ollama":
-                    ts = datetime.now(timezone.utc).isoformat()
-                    final_obj = {
-                        "model": body.get("model"),
-                        "created_at": ts,
-                        "message": {"role": "assistant", "content": ""},
-                        "done": True
-                    }
-                    yield json.dumps(final_obj, ensure_ascii=False) + "\n"
-                else:
-                    yield json.dumps({"done": True, "model": body.get("model")}, ensure_ascii=False) + "\n"
+                yield json.dumps({"done": True, "model": body.get("model")}, ensure_ascii=False) + "\n"
     except Exception as e:
         if VERBOSE:
             print(f"[STREAM] Upstream error: {e}")
