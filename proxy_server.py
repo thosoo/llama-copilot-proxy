@@ -556,6 +556,13 @@ def _oai_models_to_ollama_tags(oai_models: Dict[str, Any]) -> Dict[str, Any]:
             modified_at = datetime.now(timezone.utc).isoformat()
         alias = _friendly_model_name(mid or "unknown")
         _register_model_alias(alias, mid or "unknown")
+        # Derive architecture guess from model id prefix
+        arch_guess = "unknown"
+        if isinstance(mid, str) and mid:
+            try:
+                arch_guess = mid.split("-")[0].strip().lower() or "unknown"
+            except Exception:
+                arch_guess = "unknown"
         entry = {
             "name": alias,
             "model": mid or "unknown",
@@ -569,7 +576,8 @@ def _oai_models_to_ollama_tags(oai_models: Dict[str, Any]) -> Dict[str, Any]:
                 "families": [],
                 "parameter_size": "",
                 "quantization_level": ""
-            }
+            },
+            "model_info": {"general": {"architecture": arch_guess}},
         }
         out["models"].append(_add_caps(entry))
     return out
@@ -606,6 +614,13 @@ def api_tags():
                 except Exception:
                     modified_at = datetime.now(timezone.utc).isoformat()
                 details = e.get("details") or {}
+                # Derive architecture guess
+                arch_guess = "unknown"
+                if isinstance(mid, str) and mid:
+                    try:
+                        arch_guess = mid.split("-")[0].strip().lower() or "unknown"
+                    except Exception:
+                        arch_guess = "unknown"
                 entry = {
                     "name": alias,
                     "model": mid,
@@ -620,6 +635,7 @@ def api_tags():
                         "parameter_size": details.get("parameter_size", ""),
                         "quantization_level": details.get("quantization_level", ""),
                     },
+                    "model_info": {"general": {"architecture": arch_guess}},
                 }
                 caps = set(e.get("capabilities") or [])
                 caps.update(["completion", "chat", "embeddings", "tools", "planAndExecute"])  # inject
@@ -659,6 +675,16 @@ def api_show():
         if r.status_code == 200:
             info = r.json()
             # Provide a minimal Ollama-like show payload
+            # Derive a best-effort architecture from the model id (prefix before first dash), fallback 'unknown'
+            try:
+                arch_guess = "";
+                mid_guess = (info.get("id") or info.get("model") or model or "")
+                if isinstance(mid_guess, str) and mid_guess:
+                    arch_guess = mid_guess.split("-")[0].strip().lower()
+                if not arch_guess:
+                    arch_guess = "unknown"
+            except Exception:
+                arch_guess = "unknown"
             resp = {
                 "modelfile": "",
                 "parameters": "",
@@ -671,7 +697,11 @@ def api_show():
                     "parameter_size": "",
                     "quantization_level": ""
                 },
-                "model_info": {},
+                "model_info": {
+                    "general": {
+                        "architecture": arch_guess
+                    }
+                },
                 # Keep capabilities consistent with /api/tags for selection in Ask/Agent
                 "capabilities": ["completion", "chat", "embeddings", "tools", "planAndExecute"],
             }
@@ -688,13 +718,29 @@ def api_show():
             print(f"🔎 [/api/show] Falling back to upstream {UPSTREAM}/api/show")
     r2 = requests.post(f"{UPSTREAM}/api/show", json={"model": model}, timeout=METADATA_TIMEOUT_SECS)
         if r2.status_code == 200:
-            # Try to inject capabilities into fallback JSON
+            # Try to inject capabilities and ensure model_info.general.architecture exists
             try:
                 obj = r2.json()
                 if isinstance(obj, dict):
                     caps = set((obj.get("capabilities") or []))
                     caps.update(["completion", "chat", "embeddings", "tools", "planAndExecute"])
                     obj["capabilities"] = sorted(caps)
+                    # Ensure nested structure
+                    mi = obj.get("model_info")
+                    if not isinstance(mi, dict):
+                        mi = {}
+                        obj["model_info"] = mi
+                    gen = mi.get("general")
+                    if not isinstance(gen, dict):
+                        gen = {}
+                        mi["general"] = gen
+                    if not isinstance(gen.get("architecture"), str) or not gen.get("architecture"):
+                        try:
+                            mid_guess = (obj.get("model") or obj.get("name") or model or "")
+                            arch_guess = mid_guess.split("-")[0].strip().lower() if isinstance(mid_guess, str) and mid_guess else "unknown"
+                        except Exception:
+                            arch_guess = "unknown"
+                        gen["architecture"] = arch_guess
                     return jsonify(obj), 200
             except Exception:
                 pass
@@ -704,6 +750,7 @@ def api_show():
     # Last resort: return minimal stub so Copilot doesn't error out
     return jsonify({
         "details": {"format": "gguf", "family": "", "families": []},
+        "model_info": {"general": {"architecture": "unknown"}},
         "capabilities": ["completion", "chat", "embeddings", "tools", "planAndExecute"],
     }), 200
 
