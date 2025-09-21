@@ -506,7 +506,7 @@ def api_tags():
     try:
         if VERBOSE:
             print(f"🔎 [/api/tags] Fetching upstream models from {UPSTREAM}/v1/models ...")
-        r = requests.get(f"{UPSTREAM}/v1/models", timeout=15)
+    r = requests.get(f"{UPSTREAM}/v1/models", timeout=14400)
         r.raise_for_status()
         data = r.json()
         # Normalize into Ollama tags shape with friendly aliases and consistent capabilities
@@ -580,7 +580,7 @@ def api_show():
             model_enc = quote(model, safe="")
         except Exception:
             model_enc = model
-        r = requests.get(f"{UPSTREAM}/v1/models/{model_enc}", timeout=15)
+    r = requests.get(f"{UPSTREAM}/v1/models/{model_enc}", timeout=14400)
         if r.status_code == 200:
             info = r.json()
             # Provide a minimal Ollama-like show payload
@@ -611,7 +611,7 @@ def api_show():
     try:
         if VERBOSE:
             print(f"🔎 [/api/show] Falling back to upstream {UPSTREAM}/api/show")
-        r2 = requests.post(f"{UPSTREAM}/api/show", json={"model": model}, timeout=15)
+    r2 = requests.post(f"{UPSTREAM}/api/show", json={"model": model}, timeout=14400)
         if r2.status_code == 200:
             # Try to inject capabilities into fallback JSON
             try:
@@ -649,7 +649,7 @@ def api_embed():
                 "input_type": type((body or {}).get("input")).__name__ if isinstance(body, dict) else None,
             }
             print("🔎 [/api/embed] Proxying to /v1/embeddings with shape:", shape)
-        r = requests.post(f"{UPSTREAM}/v1/embeddings", json=body, timeout=60)
+    r = requests.post(f"{UPSTREAM}/v1/embeddings", json=body, timeout=14400)
         # Try to convert OpenAI response to Ollama shape for better client compatibility
         try:
             obj = r.json()
@@ -744,7 +744,7 @@ def fallback_proxy(path: str):
             json=json_body,
             data=data if json_body is None else None,
             stream=True,
-            timeout=60,
+            timeout=14400,
         )
 
         def generate():
