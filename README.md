@@ -298,39 +298,11 @@ Response:
     - `show_reasoning`: Route thinking to normal content stream (VSCode will display it!)
 - `THINKING_DEBUG` — Enable debug mode for thinking events (`true` or `false`).
 
-### Long-running connections (timeouts and heartbeats)
-
-These settings help avoid disconnects during long agent runs and huge prompts. All values are in seconds.
-
-- `UPSTREAM_CONNECT_TIMEOUT_SECS` — TCP connect timeout to upstream (default: 30)
-- `UPSTREAM_READ_TIMEOUT_SECS` — Read timeout for upstream streaming (default: 21600 ≈ 6 hours)
-- `RESPONSE_HEARTBEAT_SECS` — Interval for SSE heartbeat comments to client (default: 15)
-- `FALLBACK_TIMEOUT_SECS` — Timeout for generic fallback proxy requests (default: 21600 ≈ 6 hours)
-- `METADATA_TIMEOUT_SECS` — Timeout for metadata endpoints like `/v1/models` and `/api/show` (default: 15)
-
-Example for multi-hour sessions:
-```bash
-UPSTREAM_READ_TIMEOUT_SECS=$((6*60*60)) \
-FALLBACK_TIMEOUT_SECS=$((6*60*60)) \
-RESPONSE_HEARTBEAT_SECS=10 \
-python3 proxy_server.py
-```
-
 **Note:** Model aliasing is automatic; friendly names are derived from model IDs/paths and resolved transparently in requests.
 
 Set environment variables before starting the proxy:
 ```bash
 VERBOSE=1 LISTEN_PORT=11434 UPSTREAM=http://127.0.0.1:8080 THINKING_MODE=show_reasoning THINKING_DEBUG=true python3 proxy_server.py
-```
-
-Docker example with long timeouts:
-```bash
-docker run -d --name llama-copilot-proxy -p 11434:11434 \
-  -e UPSTREAM=http://host.docker.internal:8080 \
-  -e UPSTREAM_READ_TIMEOUT_SECS=$((6*60*60)) \
-  -e FALLBACK_TIMEOUT_SECS=$((6*60*60)) \
-  -e RESPONSE_HEARTBEAT_SECS=10 \
-  llama-copilot-proxy:latest
 ```
 
 ## Advanced Troubleshooting
