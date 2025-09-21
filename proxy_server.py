@@ -4,6 +4,7 @@ import time
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from queue import Queue, Empty
 
 import requests
 from flask import Flask, Response, jsonify, request, stream_with_context, g
@@ -22,6 +23,18 @@ VERBOSE = os.environ.get("VERBOSE", "false").lower() in ("1", "true", "yes")
 VERSION = "1.0.0"
 active_streams = 0
 MODEL_ALIASES: Dict[str, str] = {}
+
+# Long-running/streaming controls (env configurable)
+# Connection timeout (seconds) for establishing upstream connection
+UPSTREAM_CONNECT_TIMEOUT_SECS = float(os.environ.get("UPSTREAM_CONNECT_TIMEOUT_SECS", "30"))
+# Read timeout (seconds) for upstream streaming; defaults to 6 hours
+UPSTREAM_READ_TIMEOUT_SECS = float(os.environ.get("UPSTREAM_READ_TIMEOUT_SECS", str(6 * 60 * 60)))
+# Heartbeat interval to keep client connections alive (seconds)
+RESPONSE_HEARTBEAT_SECS = float(os.environ.get("RESPONSE_HEARTBEAT_SECS", "15"))
+# Fallback proxy timeout (seconds) for generic pass-through requests
+FALLBACK_TIMEOUT_SECS = float(os.environ.get("FALLBACK_TIMEOUT_SECS", str(6 * 60 * 60)))
+# Metadata fetch timeout (models/show), default short but configurable
+METADATA_TIMEOUT_SECS = float(os.environ.get("METADATA_TIMEOUT_SECS", "15"))
 
 
 def estimate_tokens_from_messages(messages: Optional[List[Dict[str, Any]]]) -> int:
@@ -125,225 +138,282 @@ def _stream_chat_completion(upstream_url: str, body: Dict[str, Any]):
         "Accept": "text/event-stream, application/json",
     }
 
-    with requests.post(upstream_url, data=json.dumps(body), headers=headers, stream=True) as r:
-        content_type = r.headers.get("content-type", "")
-        vlog(f"[POST] Upstream response status: {r.status_code}")
-        vlog(f"[POST] Upstream response headers: {dict(r.headers)}")
+    # Use a queue-based design so we can inject periodic heartbeats while the upstream blocks
+    out_q: "Queue[str]" = Queue()
+    SENTINEL = object()
+    stop_event = threading.Event()
 
-        # Initial heartbeats
-        yield ": heartbeat\n\n"
-        yield ": processing-prompt\n\n"
+    def _put(s: str):
+        try:
+            out_q.put(s)
+        except Exception:
+            pass
 
-        is_streaming = "text/event-stream" in content_type
+    def _reader():
+        try:
+            with requests.post(
+                upstream_url,
+                data=json.dumps(body),
+                headers=headers,
+                stream=True,
+                timeout=(UPSTREAM_CONNECT_TIMEOUT_SECS, UPSTREAM_READ_TIMEOUT_SECS),
+            ) as r:
+                content_type = r.headers.get("content-type", "")
+                vlog(f"[POST] Upstream response status: {r.status_code}")
+                vlog(f"[POST] Upstream response headers: {dict(r.headers)}")
 
-        tool_call_buffer: List[str] = []
-        is_tool_call = False
-        tool_call_detected = False
-        done_received = False
-        reasoning_prefix_emitted = False
-        reasoning_pending_separator = False
-        seen_reasoning = False
-        pre_reasoning_content_buffer = ""
+                # Initial heartbeats
+                _put(": heartbeat\n\n")
+                _put(": processing-prompt\n\n")
 
-        if is_streaming:
-            buffer = ""
-            for chunk in r.iter_content(chunk_size=1024):
-                if not chunk:
-                    continue
-                s = chunk.decode("utf-8", errors="ignore")
-                buffer += s
+                is_streaming = "text/event-stream" in content_type
 
-                parts = buffer.split("\n\n")
-                buffer = parts.pop() if parts else ""
+                tool_call_buffer: List[str] = []
+                is_tool_call = False
+                tool_call_detected = False
+                done_received = False
+                reasoning_prefix_emitted = False
+                reasoning_pending_separator = False
+                seen_reasoning = False
+                pre_reasoning_content_buffer = ""
 
-                for part in parts:
-                    if not part.strip():
-                        continue
+                if is_streaming:
+                    buffer = ""
+                    for chunk in r.iter_content(chunk_size=1024):
+                        if stop_event.is_set():
+                            break
+                        if not chunk:
+                            continue
+                        s = chunk.decode("utf-8", errors="ignore")
+                        buffer += s
 
-                    event_raw = part + "\n\n"
+                        parts = buffer.split("\n\n")
+                        buffer = parts.pop() if parts else ""
 
-                    data_lines: List[str] = []
-                    for line in part.splitlines():
-                        if line.startswith("data:"):
-                            data_lines.append(line[len("data:"):].lstrip())
-                    if not data_lines:
-                        if is_tool_call:
-                            tool_call_buffer.append(event_raw)
-                        else:
-                            yield event_raw
-                        continue
+                        for part in parts:
+                            if not part.strip():
+                                continue
 
-                    event_payload = "\n".join(data_lines)
+                            event_raw = part + "\n\n"
 
-                    if event_payload.strip() == "[DONE]":
-                        done_received = True
-                        if is_tool_call:
-                            tool_call_buffer.append("data: [DONE]\n\n")
-                        else:
-                            yield "data: [DONE]\n\n"
-                        continue
+                            data_lines: List[str] = []
+                            for line in part.splitlines():
+                                if line.startswith("data:"):
+                                    data_lines.append(line[len("data:"):].lstrip())
+                            if not data_lines:
+                                if is_tool_call:
+                                    tool_call_buffer.append(event_raw)
+                                else:
+                                    _put(event_raw)
+                                continue
 
-                    if ("tool_call" in event_payload) or ("tool_calls" in event_payload):
-                        is_tool_call = True
-                        tool_call_detected = True
-                        tool_call_buffer.append(event_raw)
-                        continue
+                            event_payload = "\n".join(data_lines)
 
-                    try:
-                        obj = json.loads(event_payload)
-                    except Exception:
-                        if is_tool_call:
-                            tool_call_buffer.append(event_raw)
-                        else:
-                            yield event_raw
-                        continue
+                            if event_payload.strip() == "[DONE]":
+                                done_received = True
+                                if is_tool_call:
+                                    tool_call_buffer.append("data: [DONE]\n\n")
+                                else:
+                                    _put("data: [DONE]\n\n")
+                                continue
 
-                    if THINKING_MODE == "show_reasoning":
-                        try:
-                            choices = obj.get("choices") if isinstance(obj, dict) else None
-                            if isinstance(choices, list) and len(choices) > 0:
-                                SEP = "\n\n---\n\n"
-                                # Snapshot whether each choice.delta had upstream 'content' BEFORE modifications
-                                had_original_delta_content = []
-                                for choice in choices:
-                                    if isinstance(choice, dict) and isinstance(choice.get("delta"), dict):
-                                        up_cont = choice["delta"].get("content")
-                                        had_original_delta_content.append(isinstance(up_cont, str) and len(up_cont) > 0)
-                                    else:
-                                        had_original_delta_content.append(False)
-                                for choice in choices:
-                                    if not isinstance(choice, dict):
-                                        continue
+                            if ("tool_call" in event_payload) or ("tool_calls" in event_payload):
+                                is_tool_call = True
+                                tool_call_detected = True
+                                tool_call_buffer.append(event_raw)
+                                continue
 
-                                    if choice.get("message") and isinstance(choice.get("message"), dict):
-                                        msg = choice["message"]
-                                        if isinstance(msg.get("reasoning_content"), str):
-                                            rc = msg.pop("reasoning_content")
-                                            rc = rc.replace("\r\n", "\n")
-                                            original = msg.get("content") or ""
-                                            seen_reasoning = True
-                                            if pre_reasoning_content_buffer or original:
-                                                # If we buffered content before reasoning or have original alongside, flush buffer after HR
-                                                combined = "💭 " + rc + SEP + (pre_reasoning_content_buffer if pre_reasoning_content_buffer else "")
-                                                if original:
-                                                    combined += original
-                                                msg["content"] = combined
-                                                pre_reasoning_content_buffer = ""
-                                                reasoning_pending_separator = False
+                            try:
+                                obj = json.loads(event_payload)
+                            except Exception:
+                                if is_tool_call:
+                                    tool_call_buffer.append(event_raw)
+                                else:
+                                    _put(event_raw)
+                                continue
+
+                            if THINKING_MODE == "show_reasoning":
+                                try:
+                                    choices = obj.get("choices") if isinstance(obj, dict) else None
+                                    if isinstance(choices, list) and len(choices) > 0:
+                                        SEP = "\n\n---\n\n"
+                                        # Snapshot whether each choice.delta had upstream 'content' BEFORE modifications
+                                        had_original_delta_content = []
+                                        for choice in choices:
+                                            if isinstance(choice, dict) and isinstance(choice.get("delta"), dict):
+                                                up_cont = choice["delta"].get("content")
+                                                had_original_delta_content.append(isinstance(up_cont, str) and len(up_cont) > 0)
                                             else:
-                                                # Emit reasoning now, and mark that the next normal content
-                                                # should be prefixed with a visible separator.
-                                                msg["content"] = "💭 " + rc
-                                                reasoning_pending_separator = True
-
-                                    if choice.get("delta") and isinstance(choice.get("delta"), dict):
-                                        d = choice["delta"]
-                                        if isinstance(d.get("reasoning_content"), str):
-                                            rc = d.pop("reasoning_content")
-                                            rc = rc.replace("\r\n", "\n")
-                                            original = d.get("content") or ""
-                                            seen_reasoning = True
-                                            if not reasoning_prefix_emitted:
-                                                if pre_reasoning_content_buffer or original:
-                                                    # Flush any buffered pre-reasoning content, plus any original content, after HR
-                                                    combined_tail = (pre_reasoning_content_buffer if pre_reasoning_content_buffer else "")
-                                                    if original:
-                                                        combined_tail += original
-                                                    d["content"] = "💭 " + rc + SEP + combined_tail
-                                                    pre_reasoning_content_buffer = ""
-                                                    reasoning_pending_separator = False
-                                                else:
-                                                    # Start reasoning block; next normal content gets prefixed with SEP.
-                                                    d["content"] = "💭 " + rc
-                                                    reasoning_pending_separator = True
-                                                reasoning_prefix_emitted = True
-                                            else:
-                                                if original:
-                                                    d["content"] = _join_with_space(rc, original)
-                                                else:
-                                                    d["content"] = rc
-                                        else:
-                                            # No reasoning in this delta; if we haven't seen reasoning yet, buffer content
-                                            cont_piece = d.get("content")
-                                            if isinstance(cont_piece, str) and cont_piece and not seen_reasoning:
-                                                pre_reasoning_content_buffer += cont_piece
-                                                # Remove content from this event so we can emit it later in order
-                                                d["content"] = ""
-
-                                if reasoning_pending_separator and isinstance(obj, dict):
-                                    try:
-                                        for idx, ch in enumerate(obj.get("choices", [])):
-                                            if not isinstance(ch, dict):
+                                                had_original_delta_content.append(False)
+                                        for choice in choices:
+                                            if not isinstance(choice, dict):
                                                 continue
-                                            if ch.get("delta") and isinstance(ch.get("delta"), dict):
-                                                delta_obj = ch["delta"]
-                                                cont = delta_obj.get("content")
-                                                # Only inject separator when upstream originally provided content in this delta
-                                                if had_original_delta_content[idx] and isinstance(cont, str) and cont:
-                                                    # Prefix the first visible content with a Markdown HR separator
-                                                    if not cont.startswith("\n---\n") and not cont.startswith("---\n"):
-                                                        delta_obj["content"] = SEP + cont
-                                                    reasoning_pending_separator = False
-                                                    break
-                                    except Exception:
-                                        pass
+
+                                            if choice.get("message") and isinstance(choice.get("message"), dict):
+                                                msg = choice["message"]
+                                                if isinstance(msg.get("reasoning_content"), str):
+                                                    rc = msg.pop("reasoning_content")
+                                                    rc = rc.replace("\r\n", "\n")
+                                                    original = msg.get("content") or ""
+                                                    seen_reasoning = True
+                                                    if pre_reasoning_content_buffer or original:
+                                                        # If we buffered content before reasoning or have original alongside, flush buffer after HR
+                                                        combined = "💭 " + rc + SEP + (pre_reasoning_content_buffer if pre_reasoning_content_buffer else "")
+                                                        if original:
+                                                            combined += original
+                                                        msg["content"] = combined
+                                                        pre_reasoning_content_buffer = ""
+                                                        reasoning_pending_separator = False
+                                                    else:
+                                                        # Emit reasoning now, and mark that the next normal content
+                                                        # should be prefixed with a visible separator.
+                                                        msg["content"] = "💭 " + rc
+                                                        reasoning_pending_separator = True
+
+                                            if choice.get("delta") and isinstance(choice.get("delta"), dict):
+                                                d = choice["delta"]
+                                                if isinstance(d.get("reasoning_content"), str):
+                                                    rc = d.pop("reasoning_content")
+                                                    rc = rc.replace("\r\n", "\n")
+                                                    original = d.get("content") or ""
+                                                    seen_reasoning = True
+                                                    if not reasoning_prefix_emitted:
+                                                        if pre_reasoning_content_buffer or original:
+                                                            # Flush any buffered pre-reasoning content, plus any original content, after HR
+                                                            combined_tail = (pre_reasoning_content_buffer if pre_reasoning_content_buffer else "")
+                                                            if original:
+                                                                combined_tail += original
+                                                            d["content"] = "💭 " + rc + SEP + combined_tail
+                                                            pre_reasoning_content_buffer = ""
+                                                            reasoning_pending_separator = False
+                                                        else:
+                                                            # Start reasoning block; next normal content gets prefixed with SEP.
+                                                            d["content"] = "💭 " + rc
+                                                            reasoning_pending_separator = True
+                                                        reasoning_prefix_emitted = True
+                                                    else:
+                                                        if original:
+                                                            d["content"] = _join_with_space(rc, original)
+                                                        else:
+                                                            d["content"] = rc
+                                                else:
+                                                    # No reasoning in this delta; if we haven't seen reasoning yet, buffer content
+                                                    cont_piece = d.get("content")
+                                                    if isinstance(cont_piece, str) and cont_piece and not seen_reasoning:
+                                                        pre_reasoning_content_buffer += cont_piece
+                                                        # Remove content from this event so we can emit it later in order
+                                                        d["content"] = ""
+
+                                        if reasoning_pending_separator and isinstance(obj, dict):
+                                            try:
+                                                for idx, ch in enumerate(obj.get("choices", [])):
+                                                    if not isinstance(ch, dict):
+                                                        continue
+                                                    if ch.get("delta") and isinstance(ch.get("delta"), dict):
+                                                        delta_obj = ch["delta"]
+                                                        cont = delta_obj.get("content")
+                                                        # Only inject separator when upstream originally provided content in this delta
+                                                        if had_original_delta_content[idx] and isinstance(cont, str) and cont:
+                                                            # Prefix the first visible content with a Markdown HR separator
+                                                            if not cont.startswith("\n---\n") and not cont.startswith("---\n"):
+                                                                delta_obj["content"] = SEP + cont
+                                                            reasoning_pending_separator = False
+                                                            break
+                                            except Exception:
+                                                pass
+                                except Exception:
+                                    pass
+
+                            try:
+                                out_payload = json.dumps(obj)
+                            except Exception:
+                                out_payload = event_payload
+
+                            out_event = f"data: {out_payload}\n\n"
+                            if is_tool_call:
+                                tool_call_buffer.append(out_event)
+                            else:
+                                _put(out_event)
+
+                    if tool_call_detected:
+                        _put("".join(tool_call_buffer))
+                    # If no reasoning ever appeared but we buffered content, flush it before [DONE]
+                    if (not seen_reasoning) and pre_reasoning_content_buffer:
+                        try:
+                            flush_obj = {
+                                "choices": [
+                                    {"delta": {"content": pre_reasoning_content_buffer}}
+                                ]
+                            }
+                            _put(f"data: {json.dumps(flush_obj)}\n\n")
                         except Exception:
                             pass
-
+                    if not done_received:
+                        _put("data: [DONE]\n\n")
+                else:
+                    raw = r.content
                     try:
-                        out_payload = json.dumps(obj)
+                        data = json.loads(raw)
                     except Exception:
-                        out_payload = event_payload
+                        data = raw.decode("utf-8", errors="ignore")
 
-                    out_event = f"data: {out_payload}\n\n"
-                    if is_tool_call:
-                        tool_call_buffer.append(out_event)
-                    else:
-                        yield out_event
-
-            if tool_call_detected:
-                yield "".join(tool_call_buffer)
-            # If no reasoning ever appeared but we buffered content, flush it before [DONE]
-            if (not seen_reasoning) and pre_reasoning_content_buffer:
-                try:
-                    flush_obj = {
-                        "choices": [
-                            {"delta": {"content": pre_reasoning_content_buffer}}
-                        ]
-                    }
-                    yield f"data: {json.dumps(flush_obj)}\n\n"
-                except Exception:
-                    pass
-            if not done_received:
-                yield "data: [DONE]\n\n"
-        else:
-            raw = r.content
+                    if (
+                        isinstance(data, dict)
+                        and data.get("choices")
+                        and data["choices"][0].get("message")
+                        and data["choices"][0]["message"].get("reasoning_content")
+                    ):
+                        reasoning_content = data["choices"][0]["message"]["reasoning_content"]
+                        if THINKING_MODE == "show_reasoning":
+                            modified = dict(data)
+                            msg = dict(modified["choices"][0]["message"])  # shallow copy
+                            rc = str(reasoning_content).replace("\r\n", "\n")
+                            original = msg.get("content") or ""
+                            SEP = "\n\n---\n\n"
+                            if original:
+                                msg["content"] = "💭 " + rc + SEP + original
+                            else:
+                                msg["content"] = "💭 " + rc
+                            msg.pop("reasoning_content", None)
+                            modified["choices"][0]["message"] = msg
+                            data = modified
+                    _put(json.dumps(data))
+        except Exception as e:
+            # Surface error downstream as a synthetic SSE event to avoid silent hangs
             try:
-                data = json.loads(raw)
+                _put(f"data: {json.dumps({'error': 'upstream_error', 'message': str(e)})}\n\n")
             except Exception:
-                data = raw.decode("utf-8", errors="ignore")
+                pass
+        finally:
+            out_q.put(SENTINEL)
 
-            if (
-                isinstance(data, dict)
-                and data.get("choices")
-                and data["choices"][0].get("message")
-                and data["choices"][0]["message"].get("reasoning_content")
-            ):
-                reasoning_content = data["choices"][0]["message"]["reasoning_content"]
-                if THINKING_MODE == "show_reasoning":
-                    modified = dict(data)
-                    msg = dict(modified["choices"][0]["message"])  # shallow copy
-                    rc = str(reasoning_content).replace("\r\n", "\n")
-                    original = msg.get("content") or ""
-                    SEP = "\n\n---\n\n"
-                    if original:
-                        msg["content"] = "💭 " + rc + SEP + original
-                    else:
-                        msg["content"] = "💭 " + rc
-                    msg.pop("reasoning_content", None)
-                    modified["choices"][0]["message"] = msg
-                    data = modified
-            yield json.dumps(data)
+    def _heartbeater():
+        try:
+            while not stop_event.is_set():
+                time.sleep(max(1.0, RESPONSE_HEARTBEAT_SECS))
+                if stop_event.is_set():
+                    break
+                _put(": heartbeat\n\n")
+        except Exception:
+            pass
+
+    t_r = threading.Thread(target=_reader, daemon=True)
+    t_h = threading.Thread(target=_heartbeater, daemon=True)
+    t_r.start()
+    t_h.start()
+
+    try:
+        while True:
+            try:
+                item = out_q.get(timeout=max(1.0, RESPONSE_HEARTBEAT_SECS * 2))
+            except Empty:
+                # No output recently; continue waiting (heartbeater will inject comments)
+                continue
+            if item is SENTINEL:
+                break
+            yield item
+    finally:
+        stop_event.set()
 
 
 def _increment_streams():
@@ -442,14 +512,19 @@ def api_chat_compat():
     try:
         generator = _stream_chat_completion(upstream_url, body)
 
-        def _cleanup_generator(gen):
+    def _cleanup_generator(gen):
             try:
                 for x in gen:
                     yield x
             finally:
                 _decrement_streams("stream end")
 
-        return Response(stream_with_context(_cleanup_generator(generator)), mimetype="text/event-stream")
+    resp = Response(stream_with_context(_cleanup_generator(generator)), mimetype="text/event-stream")
+    # Keep-alive headers for long SSE sessions
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["Connection"] = "keep-alive"
+    resp.headers["X-Accel-Buffering"] = "no"  # disable nginx buffering if present
+    return resp
     except Exception as e:
         _decrement_streams("upstream error")
         print(f"[POST] Upstream request error for /api/chat:", e)
@@ -506,7 +581,7 @@ def api_tags():
     try:
         if VERBOSE:
             print(f"🔎 [/api/tags] Fetching upstream models from {UPSTREAM}/v1/models ...")
-        r = requests.get(f"{UPSTREAM}/v1/models", timeout=15)
+    r = requests.get(f"{UPSTREAM}/v1/models", timeout=METADATA_TIMEOUT_SECS)
         r.raise_for_status()
         data = r.json()
         # Normalize into Ollama tags shape with friendly aliases and consistent capabilities
@@ -580,7 +655,7 @@ def api_show():
             model_enc = quote(model, safe="")
         except Exception:
             model_enc = model
-        r = requests.get(f"{UPSTREAM}/v1/models/{model_enc}", timeout=15)
+    r = requests.get(f"{UPSTREAM}/v1/models/{model_enc}", timeout=METADATA_TIMEOUT_SECS)
         if r.status_code == 200:
             info = r.json()
             # Provide a minimal Ollama-like show payload
@@ -611,7 +686,7 @@ def api_show():
     try:
         if VERBOSE:
             print(f"🔎 [/api/show] Falling back to upstream {UPSTREAM}/api/show")
-        r2 = requests.post(f"{UPSTREAM}/api/show", json={"model": model}, timeout=15)
+    r2 = requests.post(f"{UPSTREAM}/api/show", json={"model": model}, timeout=METADATA_TIMEOUT_SECS)
         if r2.status_code == 200:
             # Try to inject capabilities into fallback JSON
             try:
@@ -649,7 +724,11 @@ def api_embed():
                 "input_type": type((body or {}).get("input")).__name__ if isinstance(body, dict) else None,
             }
             print("🔎 [/api/embed] Proxying to /v1/embeddings with shape:", shape)
-        r = requests.post(f"{UPSTREAM}/v1/embeddings", json=body, timeout=60)
+        r = requests.post(
+            f"{UPSTREAM}/v1/embeddings",
+            json=body,
+            timeout=(UPSTREAM_CONNECT_TIMEOUT_SECS, UPSTREAM_READ_TIMEOUT_SECS),
+        )
         # Try to convert OpenAI response to Ollama shape for better client compatibility
         try:
             obj = r.json()
@@ -696,14 +775,18 @@ def chat_completions():
     try:
         generator = _stream_chat_completion(upstream_url, body)
 
-        def _cleanup_generator(gen):
+    def _cleanup_generator(gen):
             try:
                 for x in gen:
                     yield x
             finally:
                 _decrement_streams("stream end")
 
-        return Response(stream_with_context(_cleanup_generator(generator)), mimetype="text/event-stream")
+    resp = Response(stream_with_context(_cleanup_generator(generator)), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["Connection"] = "keep-alive"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
     except Exception as e:
         _decrement_streams("upstream error")
         print(f"[POST] Upstream request error for {request.path}:", e)
@@ -744,7 +827,7 @@ def fallback_proxy(path: str):
             json=json_body,
             data=data if json_body is None else None,
             stream=True,
-            timeout=60,
+            timeout=(UPSTREAM_CONNECT_TIMEOUT_SECS, FALLBACK_TIMEOUT_SECS),
         )
 
         def generate():
@@ -782,6 +865,11 @@ def _print_banner():
     print("   - 'show_reasoning': Route thinking to normal content stream (VSCode will display it!)")
     print("   - 'off': Disable thinking content entirely")
     print("\n   Configure with: THINKING_MODE=show_reasoning THINKING_DEBUG=true python proxy_server.py")
+    print("\nTimeouts / Heartbeats:")
+    print(f"   UPSTREAM_CONNECT_TIMEOUT_SECS: {UPSTREAM_CONNECT_TIMEOUT_SECS}")
+    print(f"   UPSTREAM_READ_TIMEOUT_SECS:    {UPSTREAM_READ_TIMEOUT_SECS}")
+    print(f"   RESPONSE_HEARTBEAT_SECS:       {RESPONSE_HEARTBEAT_SECS}")
+    print(f"   FALLBACK_TIMEOUT_SECS:         {FALLBACK_TIMEOUT_SECS}")
 
 
 if __name__ == "__main__":

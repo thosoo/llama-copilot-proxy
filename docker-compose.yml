@@ -5,6 +5,7 @@ services:
       context: .
       target: prod
     network_mode: host  # Use host networking to access WireGuard
+    restart: unless-stopped
     environment:
       - LISTEN_HOST=0.0.0.0  # Binds to all interfaces - accessible from WireGuard
       - LISTEN_PORT=11434
@@ -12,6 +13,12 @@ services:
       - UPSTREAM=http://127.0.0.1:8080
       - THINKING_MODE=show_reasoning
       - THINKING_DEBUG=true
+      # Long-running timeouts/heartbeats (seconds)
+      - UPSTREAM_CONNECT_TIMEOUT_SECS=30
+      - UPSTREAM_READ_TIMEOUT_SECS=21600    # 6 hours
+      - FALLBACK_TIMEOUT_SECS=21600         # 6 hours
+      - RESPONSE_HEARTBEAT_SECS=10          # frequent SSE heartbeats
+      - METADATA_TIMEOUT_SECS=15
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:11434/api/version || exit 1"]
       interval: 10s
