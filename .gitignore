@@ -1,5 +1,4 @@
 node_modules/
 .venv
-venv
 nohup.out
 __pycache__
